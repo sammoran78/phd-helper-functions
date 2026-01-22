@@ -1,0 +1,17 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "COSMOSDB_CONNECTION_STRING": "",
+    "COSMOSDB_DATABASE_NAME": "phd-helper",
+    "COSMOSDB_CONTAINER_REFERENCES": "references",
+    "COSMOSDB_CONTAINER_PROJECTS": "projects",
+    "COSMOSDB_CONTAINER_ANALYTICS": "analytics",
+    "BLOB_STORAGE_CONNECTION_STRING": "",
+    "BLOB_CONTAINER_UPLOADS": "uploads",
+    "OPENAI_API_KEY": "",
+    "OPENAI_MODEL": "gpt-4o-mini",
+    "OPENAI_REASONING_EFFORT": "low"
+  }
+}
