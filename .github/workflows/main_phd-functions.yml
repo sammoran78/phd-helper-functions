@@ -55,38 +55,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: node-app
-
+      
       - name: Unzip artifact for deployment
         run: unzip release.zip
       
-      - name: 'Deploy to Azure Functions using publish profile'
-        run: |
-          # Extract credentials from publish profile
-          echo "${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}" > publish-profile.xml
-          
-          # Install xmllint if needed
-          sudo apt-get update && sudo apt-get install -y libxml2-utils
-          
-          # Get the deployment URL and credentials using xmllint
-          DEPLOY_URL=$(xmllint --xpath "string(//publishData/publishProfile[@publishMethod='MSDeploy']/@publishUrl)" publish-profile.xml)
-          USERNAME=$(xmllint --xpath "string(//publishData/publishProfile[@publishMethod='MSDeploy']/@userName)" publish-profile.xml)
-          PASSWORD=$(xmllint --xpath "string(//publishData/publishProfile[@publishMethod='MSDeploy']/@userPWD)" publish-profile.xml)
-          
-          echo "Deploying to: https://$DEPLOY_URL"
-          
-          # Create deployment package (exclude node_modules to reduce size, they're already in the artifact)
-          zip -r deploy.zip . -x "*.git*" "publish-profile.xml" "release.zip" ".github/*"
-          
-          # Deploy using Kudu REST API directly
-          curl -X POST \
-            "https://$DEPLOY_URL/api/zipdeploy?isAsync=true" \
-            -u "$USERNAME:$PASSWORD" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @deploy.zip \
-            -w "\nHTTP Status: %{http_code}\n" \
-            --fail-with-body
-          
-          # Clean up
-          rm publish-profile.xml deploy.zip
-          
-          echo "Deployment initiated successfully"
+      - name: 'Run Azure Functions Action'
+        uses: Azure/functions-action@v1
+        id: deploy-to-function
+        with:
+          app-name: 'phd-functions'
+          slot-name: 'Production'
+          package: '.'
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}
