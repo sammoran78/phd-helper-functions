@@ -57,17 +57,30 @@ jobs:
           name: node-app
 
       - name: Unzip artifact for deployment
-        run: |
-          unzip release.zip
-          rm release.zip
+        run: unzip release.zip
       
-      - name: 'Run Azure Functions Action'
-        uses: Azure/functions-action@v1
-        id: fa
-        with:
-          app-name: 'phd-functions'
-          slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}
-          scm-do-build-during-deployment: false
-          enable-oryx-build: false
+      - name: 'Deploy to Azure Functions using publish profile'
+        run: |
+          # Extract credentials from publish profile
+          echo "${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}" > publish-profile.xml
+          
+          # Get the deployment URL and credentials
+          DEPLOY_URL=$(grep -oP '(?<=publishUrl=")[^"]*' publish-profile.xml | head -1)
+          USERNAME=$(grep -oP '(?<=userName=")[^"]*' publish-profile.xml | head -1)
+          PASSWORD=$(grep -oP '(?<=userPWD=")[^"]*' publish-profile.xml | head -1)
+          
+          # Create deployment package
+          zip -r deploy.zip . -x "*.git*" "publish-profile.xml" "release.zip"
+          
+          # Deploy using Kudu REST API directly
+          curl -X POST \
+            "https://$DEPLOY_URL/api/zipdeploy?isAsync=true" \
+            -u "$USERNAME:$PASSWORD" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @deploy.zip \
+            -w "\nHTTP Status: %{http_code}\n"
+          
+          # Clean up
+          rm publish-profile.xml deploy.zip
+          
+          echo "Deployment initiated successfully"
