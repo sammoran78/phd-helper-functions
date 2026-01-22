@@ -64,15 +64,18 @@ jobs:
           # Extract credentials from publish profile
           echo "${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}" > publish-profile.xml
           
-          # Get the deployment URL and credentials using sed
-          DEPLOY_URL=$(sed -n 's/.*publishUrl="\([^"]*\)".*/\1/p' publish-profile.xml | head -1)
-          USERNAME=$(sed -n 's/.*userName="\([^"]*\)".*/\1/p' publish-profile.xml | head -1)
-          PASSWORD=$(sed -n 's/.*userPWD="\([^"]*\)".*/\1/p' publish-profile.xml | head -1)
+          # Install xmllint if needed
+          sudo apt-get update && sudo apt-get install -y libxml2-utils
+          
+          # Get the deployment URL and credentials using xmllint
+          DEPLOY_URL=$(xmllint --xpath "string(//publishData/publishProfile[@publishMethod='MSDeploy']/@publishUrl)" publish-profile.xml)
+          USERNAME=$(xmllint --xpath "string(//publishData/publishProfile[@publishMethod='MSDeploy']/@userName)" publish-profile.xml)
+          PASSWORD=$(xmllint --xpath "string(//publishData/publishProfile[@publishMethod='MSDeploy']/@userPWD)" publish-profile.xml)
           
           echo "Deploying to: https://$DEPLOY_URL"
           
-          # Create deployment package
-          zip -r deploy.zip . -x "*.git*" "publish-profile.xml" "release.zip"
+          # Create deployment package (exclude node_modules to reduce size, they're already in the artifact)
+          zip -r deploy.zip . -x "*.git*" "publish-profile.xml" "release.zip" ".github/*"
           
           # Deploy using Kudu REST API directly
           curl -X POST \
