@@ -83,7 +83,7 @@ app.http('UpsertAnalytics', {
     }
 });
 
-// POST /api/analytics/analyze - Analyze references corpus (placeholder for AI analysis)
+// POST /api/analytics/analyze - Analyze references corpus
 app.http('AnalyzeCorpus', {
     methods: ['POST'],
     authLevel: 'anonymous',
@@ -96,32 +96,100 @@ app.http('AnalyzeCorpus', {
             
             context.log(`Analyzing ${references.length} references`);
             
-            // Basic analysis (placeholder - can be enhanced with actual AI later)
+            // Extract methods from design/analysis fields
+            const methodCounts = {};
+            const subjectCounts = {};
+            const disciplineCounts = {};
+            const typeCounts = {};
+            const yearCounts = {};
+            
+            references.forEach(ref => {
+                // Count types
+                if (ref.type) {
+                    typeCounts[ref.type] = (typeCounts[ref.type] || 0) + 1;
+                }
+                
+                // Count years
+                if (ref.year) {
+                    yearCounts[ref.year] = (yearCounts[ref.year] || 0) + 1;
+                }
+                
+                // Count disciplines
+                if (ref.discipline) {
+                    disciplineCounts[ref.discipline] = (disciplineCounts[ref.discipline] || 0) + 1;
+                }
+                
+                // Extract methods from design field
+                if (ref.design) {
+                    const methodKeywords = ['qualitative', 'quantitative', 'mixed methods', 'case study', 
+                        'ethnography', 'survey', 'interview', 'content analysis', 'discourse analysis',
+                        'grounded theory', 'action research', 'experimental', 'longitudinal', 'cross-sectional'];
+                    const designLower = ref.design.toLowerCase();
+                    methodKeywords.forEach(method => {
+                        if (designLower.includes(method)) {
+                            methodCounts[method] = (methodCounts[method] || 0) + 1;
+                        }
+                    });
+                }
+                
+                // Extract subjects from keywords/tags
+                const keywords = (ref.keywords || '') + ',' + (ref.tags || '');
+                keywords.split(',').forEach(kw => {
+                    const cleaned = kw.trim().toLowerCase();
+                    if (cleaned.length > 2 && cleaned.length < 40) {
+                        subjectCounts[cleaned] = (subjectCounts[cleaned] || 0) + 1;
+                    }
+                });
+            });
+            
+            // Convert to arrays sorted by count
+            const methods = Object.entries(methodCounts)
+                .map(([name, count]) => ({ name, count }))
+                .sort((a, b) => b.count - a.count);
+            
+            const subjects = Object.entries(subjectCounts)
+                .map(([name, count]) => ({ name, count }))
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 20); // Top 20 subjects
+            
+            // Generate insights text
+            const topDisciplines = Object.entries(disciplineCounts)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([name]) => name);
+            
+            const insights = `Your corpus contains ${references.length} references spanning ${Object.keys(yearCounts).length} years. ` +
+                `Primary disciplines: ${topDisciplines.join(', ') || 'Not categorized'}. ` +
+                `Most common types: ${Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).slice(0,3).map(([t]) => t).join(', ') || 'Various'}.`;
+            
+            // Identify potential gaps (simplified heuristic)
+            const gaps = [];
+            const expectedMethods = ['qualitative', 'quantitative', 'mixed methods'];
+            expectedMethods.forEach(method => {
+                if (!methodCounts[method] || methodCounts[method] < 3) {
+                    gaps.push({
+                        name: `Limited ${method} research`,
+                        description: `Consider adding more ${method} studies to strengthen methodological diversity.`,
+                        severity: methodCounts[method] ? 0.4 : 0.7,
+                        connectedDomains: topDisciplines
+                    });
+                }
+            });
+            
             const analysis = {
                 id: `analytics_${Date.now()}`,
                 dateGenerated: new Date().toISOString(),
                 timestamp: new Date().toISOString(),
+                referenceCount: references.length,
                 totalReferences: references.length,
-                byType: {},
-                byYear: {},
-                byDiscipline: {},
-                gaps: [],
-                subjects: [],
-                methods: []
+                insights,
+                methods,
+                subjects,
+                gaps,
+                byType: typeCounts,
+                byYear: yearCounts,
+                byDiscipline: disciplineCounts
             };
-            
-            // Count by type, year, discipline
-            references.forEach(ref => {
-                if (ref.type) {
-                    analysis.byType[ref.type] = (analysis.byType[ref.type] || 0) + 1;
-                }
-                if (ref.year) {
-                    analysis.byYear[ref.year] = (analysis.byYear[ref.year] || 0) + 1;
-                }
-                if (ref.discipline) {
-                    analysis.byDiscipline[ref.discipline] = (analysis.byDiscipline[ref.discipline] || 0) + 1;
-                }
-            });
             
             // Save to CosmosDB
             await upsertItem(CONTAINER_NAME, analysis);
