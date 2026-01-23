@@ -2,7 +2,7 @@
   "name": "phd-helper-functions",
   "version": "1.0.0",
   "description": "Azure Functions API for PhD Helper Dashboard",
-  "main": "src/functions/*.js",
+  "main": "src/index.js",
   "scripts": {
     "start": "func start",
     "test": "echo \"No tests configured\""
