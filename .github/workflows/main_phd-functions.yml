@@ -37,3 +37,5 @@ jobs:
           package: deploy.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}
           respect-funcignore: true
+          scm-do-build-during-deployment: false
+          enable-oryx-build: false
