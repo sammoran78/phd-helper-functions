@@ -151,30 +151,99 @@ app.http('AnalyzeCorpus', {
                 .map(([name, count]) => ({ name, count }))
                 .sort((a, b) => b.count - a.count)
                 .slice(0, 20); // Top 20 subjects
-            
-            // Generate insights text
+                
             const topDisciplines = Object.entries(disciplineCounts)
                 .sort((a, b) => b[1] - a[1])
                 .slice(0, 3)
                 .map(([name]) => name);
-            
-            const insights = `Your corpus contains ${references.length} references spanning ${Object.keys(yearCounts).length} years. ` +
-                `Primary disciplines: ${topDisciplines.join(', ') || 'Not categorized'}. ` +
-                `Most common types: ${Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).slice(0,3).map(([t]) => t).join(', ') || 'Various'}.`;
-            
-            // Identify potential gaps (simplified heuristic)
-            const gaps = [];
-            const expectedMethods = ['qualitative', 'quantitative', 'mixed methods'];
-            expectedMethods.forEach(method => {
-                if (!methodCounts[method] || methodCounts[method] < 3) {
+
+            let insights = '';
+            let gaps = [];
+
+            // AI Analysis (if API key present)
+            if (process.env.OPENAI_API_KEY) {
+                try {
+                    const OpenAI = require('openai');
+                    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+                    
+                    // Prepare reference summaries for AI
+                    const refSummaries = references.slice(0, 100).map(r => 
+                        `- ${r.title} (${r.year}): ${r.design || 'No method'} | ${r.discipline || 'No discipline'} | ${r.keywords || ''}`
+                    ).join('\n');
+
+                    const prompt = `
+                        Analyze this academic bibliography (${references.length} references) for a PhD thesis.
+                        
+                        Data Summary:
+                        - Disciplines: ${topDisciplines.join(', ')}
+                        - Methods: ${methods.map(m => m.name).join(', ')}
+                        - Key Topics: ${subjects.slice(0, 10).map(s => s.name).join(', ')}
+                        
+                        Bibliography Sample:
+                        ${refSummaries}
+                        
+                        Task:
+                        1. Summarize the research landscape and coverage.
+                        2. Identify 3-5 critical gaps in methodology, theory, or empirical settings.
+                        3. Suggest specific types of sources needed to fill these gaps.
+                        
+                        Output JSON format:
+                        {
+                            "insights": "paragraph summary...",
+                            "gaps": [
+                                { "name": "Gap Name", "description": "Description...", "severity": 0.8 (0-1), "connectedDomains": ["Domain1"], "searchQueries": ["query1", "query2"] }
+                            ]
+                        }
+                    `;
+
+                    const completion = await openai.chat.completions.create({
+                        model: "gpt-4o",
+                        messages: [{ role: "user", content: prompt }],
+                        response_format: { type: "json_object" }
+                    });
+
+                    const aiResult = JSON.parse(completion.choices[0].message.content);
+                    insights = aiResult.insights;
+                    gaps = aiResult.gaps || [];
+                    
+                } catch (aiError) {
+                    context.warn('AI Analysis failed, falling back to heuristics:', aiError.message);
+                }
+            }
+
+            // Fallback Heuristics (if AI failed or no key)
+            if (!insights) {
+                insights = `Your corpus contains ${references.length} references spanning ${Object.keys(yearCounts).length} years. ` +
+                    `Primary disciplines: ${topDisciplines.join(', ') || 'Not categorized'}. ` +
+                    `Most common types: ${Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).slice(0,3).map(([t]) => t).join(', ') || 'Various'}.`;
+                
+                // Methodology Gaps
+                const expectedMethods = ['qualitative', 'quantitative', 'mixed methods'];
+                expectedMethods.forEach(method => {
+                    if (!methodCounts[method] || methodCounts[method] < 3) {
+                        gaps.push({
+                            name: `Limited ${method} research`,
+                            description: `Consider adding more ${method} studies to strengthen methodological diversity.`,
+                            severity: methodCounts[method] ? 0.4 : 0.7,
+                            connectedDomains: topDisciplines,
+                            searchQueries: [`${method} study ${topDisciplines[0] || 'research'}`, `${method} analysis ${subjects[0]?.name || ''}`]
+                        });
+                    }
+                });
+                
+                // Recency Gaps
+                const currentYear = new Date().getFullYear();
+                const recentRefs = references.filter(r => r.year >= currentYear - 2).length;
+                if (recentRefs < references.length * 0.2) {
                     gaps.push({
-                        name: `Limited ${method} research`,
-                        description: `Consider adding more ${method} studies to strengthen methodological diversity.`,
-                        severity: methodCounts[method] ? 0.4 : 0.7,
-                        connectedDomains: topDisciplines
+                        name: 'Outdated Literature',
+                        description: `Only ${recentRefs} references from the last 2 years. Field is moving fast.`,
+                        severity: 0.8,
+                        connectedDomains: topDisciplines,
+                        searchQueries: [`latest research ${subjects[0]?.name || ''} ${currentYear}`, `new developments ${topDisciplines[0] || ''}`]
                     });
                 }
-            });
+            }
             
             const analysis = {
                 id: `analytics_${Date.now()}`,
