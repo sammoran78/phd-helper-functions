@@ -1,5 +1,5 @@
 const { app } = require('@azure/functions');
-const { queryItems, createItem, getItem, updateItem, deleteItem } = require('../../shared/cosmosClient');
+const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 
@@ -97,7 +97,7 @@ app.http('UpdateReference', {
                 dateModified: new Date().toISOString()
             };
             
-            const updated = await updateItem(CONTAINER_NAME, id, updatedReference);
+            const updated = await upsertItem(CONTAINER_NAME, updatedReference);
             
             context.log(`Updated reference: ${id}`);
             
