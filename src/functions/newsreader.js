@@ -177,7 +177,7 @@ app.http('GetNewsreaderArticles', {
             ];
             
             // Search queries
-            const searchQueries = [
+            const baseSearchQueries = [
                 { query: 'longitudinal study generative AI creative practice workflow', category: 'Longitudinal AI Studies' },
                 { query: 'ethnography AI creative work studio practice', category: 'AI Ethnography' },
                 { query: 'AI governance creative industries provenance attribution', category: 'AI Governance' },
@@ -194,6 +194,35 @@ app.http('GetNewsreaderArticles', {
                 { query: 'AI music composition production audio generation', category: 'AI & Music' },
                 { query: 'AI agency autonomy creativity intentionality', category: 'AI & Agency' }
             ];
+
+            // Fetch latest analytics to get research gaps
+            let analyticsGaps = [];
+            try {
+                const query = 'SELECT * FROM c ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1';
+                const analyticsResults = await queryItems(SHORTLIST_CONTAINER, { query });
+                if (analyticsResults.length > 0 && analyticsResults[0].gaps) {
+                    analyticsGaps = analyticsResults[0].gaps;
+                    context.log(`[Newsreader] Found ${analyticsGaps.length} research gaps from analytics`);
+                }
+            } catch (e) {
+                context.warn('[Newsreader] Failed to load analytics gaps:', e.message);
+            }
+
+            // Generate gap-based queries
+            const gapQueries = [];
+            analyticsGaps.forEach(gap => {
+                if (gap.searchQueries && Array.isArray(gap.searchQueries)) {
+                    gap.searchQueries.forEach(q => {
+                        gapQueries.push({
+                            query: q,
+                            category: `Gap: ${gap.name}`
+                        });
+                    });
+                }
+            });
+
+            // Combine queries, prioritizing gaps
+            const searchQueries = [...gapQueries, ...baseSearchQueries];
             
             const isRelevantArticle = (title, abstract) => {
                 const text = `${title || ''} ${abstract || ''}`.toLowerCase();
