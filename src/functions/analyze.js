@@ -13,6 +13,8 @@ app.http('AnalyzeReference', {
             const body = await request.json();
             const { blobName, fileName, section } = body;
             
+            context.log(`[Analyze] Request received: section=${section}, blobName=${blobName}, fileName=${fileName}`);
+            
             if (!blobName || !section) {
                 return {
                     status: 400,
@@ -21,9 +23,41 @@ app.http('AnalyzeReference', {
                 };
             }
             
+            // Check for required env vars
+            if (!process.env.BLOB_STORAGE_CONNECTION_STRING) {
+                context.error('[Analyze] BLOB_STORAGE_CONNECTION_STRING not set');
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Blob storage not configured' })
+                };
+            }
+            
+            if (!process.env.OPENAI_API_KEY) {
+                context.error('[Analyze] OPENAI_API_KEY not set');
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'OpenAI API key not configured' })
+                };
+            }
+            
             // Download file from blob storage
             const containerName = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
-            const buffer = await downloadBlob(containerName, blobName);
+            context.log(`[Analyze] Downloading from container: ${containerName}, blob: ${blobName}`);
+            
+            let buffer;
+            try {
+                buffer = await downloadBlob(containerName, blobName);
+                context.log(`[Analyze] Downloaded ${buffer.length} bytes`);
+            } catch (downloadError) {
+                context.error('[Analyze] Download failed:', downloadError.message);
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Failed to download file from storage', details: downloadError.message })
+                };
+            }
             
             // Determine file type
             const name = fileName || blobName;
@@ -32,8 +66,21 @@ app.http('AnalyzeReference', {
             if (extension === 'pdf') fileType = 'pdf';
             else if (extension === 'docx') fileType = 'docx';
             
+            context.log(`[Analyze] File type detected: ${fileType}`);
+            
             // Extract text from document
-            const text = await extractTextFromBuffer(buffer, fileType);
+            let text;
+            try {
+                text = await extractTextFromBuffer(buffer, fileType);
+                context.log(`[Analyze] Extracted ${text?.length || 0} characters`);
+            } catch (extractError) {
+                context.error('[Analyze] Text extraction failed:', extractError.message);
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Failed to extract text from document', details: extractError.message })
+                };
+            }
             
             if (!text || text.length < 100) {
                 return {
@@ -60,6 +107,7 @@ app.http('AnalyzeReference', {
             }
             
             // Call OpenAI
+            context.log('[Analyze] Calling OpenAI...');
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
             const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
             
