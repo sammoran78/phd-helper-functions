@@ -1,4 +1,5 @@
 require('./functions/references');
+require('./functions/analyze');
 require('./functions/upload');
 require('./functions/calendar');
 require('./functions/drive');
