@@ -17,17 +17,22 @@ const SCOPES = [
 
 /**
  * Get Service Account auth client
- * Reads from GOOGLE_SERVICE_ACCOUNT_JSON env var (JSON string)
+ * Reads from GOOGLE_SERVICE_ACCOUNT_JSON env var (JSON string or base64-encoded JSON)
  */
 function getServiceAccountAuth() {
     if (cachedServiceAuth) return cachedServiceAuth;
     
-    const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    let serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     if (!serviceAccountJson) {
         return null;
     }
     
     try {
+        // Check if it's base64 encoded (doesn't start with '{')
+        if (!serviceAccountJson.trim().startsWith('{')) {
+            serviceAccountJson = Buffer.from(serviceAccountJson, 'base64').toString('utf8');
+        }
+        
         const credentials = JSON.parse(serviceAccountJson);
         cachedServiceAuth = new google.auth.GoogleAuth({
             credentials,
