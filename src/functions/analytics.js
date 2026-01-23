@@ -83,6 +83,67 @@ app.http('UpsertAnalytics', {
     }
 });
 
+// POST /api/analytics/analyze - Analyze references corpus (placeholder for AI analysis)
+app.http('AnalyzeCorpus', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'analytics/analyze',
+    handler: async (request, context) => {
+        try {
+            // Get all references from CosmosDB
+            const referencesContainer = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+            const references = await queryItems(referencesContainer, 'SELECT * FROM c');
+            
+            context.log(`Analyzing ${references.length} references`);
+            
+            // Basic analysis (placeholder - can be enhanced with actual AI later)
+            const analysis = {
+                id: `analytics_${Date.now()}`,
+                dateGenerated: new Date().toISOString(),
+                timestamp: new Date().toISOString(),
+                totalReferences: references.length,
+                byType: {},
+                byYear: {},
+                byDiscipline: {},
+                gaps: [],
+                subjects: [],
+                methods: []
+            };
+            
+            // Count by type, year, discipline
+            references.forEach(ref => {
+                if (ref.type) {
+                    analysis.byType[ref.type] = (analysis.byType[ref.type] || 0) + 1;
+                }
+                if (ref.year) {
+                    analysis.byYear[ref.year] = (analysis.byYear[ref.year] || 0) + 1;
+                }
+                if (ref.discipline) {
+                    analysis.byDiscipline[ref.discipline] = (analysis.byDiscipline[ref.discipline] || 0) + 1;
+                }
+            });
+            
+            // Save to CosmosDB
+            await upsertItem(CONTAINER_NAME, analysis);
+            
+            context.log('Analysis complete and saved');
+            
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(analysis)
+            };
+        } catch (error) {
+            context.error('Analyze Corpus Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to analyze corpus', details: error.message })
+            };
+        }
+    }
+});
+
 // GET /api/analytics/history - Get analytics history
 app.http('GetAnalyticsHistory', {
     methods: ['GET'],
