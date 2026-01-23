@@ -1,6 +1,6 @@
 const { app } = require('@azure/functions');
 const { downloadBlob } = require('../../shared/blobClient');
-const { extractText } = require('../../shared/textExtractor');
+const { extractTextFromBuffer } = require('../../shared/textExtractor');
 const OpenAI = require('openai');
 
 // POST /api/references/analyze - Analyze a document with OpenAI
@@ -25,8 +25,15 @@ app.http('AnalyzeReference', {
             const containerName = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
             const buffer = await downloadBlob(containerName, blobName);
             
+            // Determine file type
+            const name = fileName || blobName;
+            const extension = name.split('.').pop().toLowerCase();
+            let fileType = 'unknown';
+            if (extension === 'pdf') fileType = 'pdf';
+            else if (extension === 'docx') fileType = 'docx';
+            
             // Extract text from document
-            const text = await extractText(buffer, fileName || blobName);
+            const text = await extractTextFromBuffer(buffer, fileType);
             
             if (!text || text.length < 100) {
                 return {
