@@ -8,6 +8,7 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_NAME: 'phd-functions'
+  AZURE_RESOURCE_GROUP: 'phdhelper-AUeast'
   NODE_VERSION: '20.x'
 
 jobs:
@@ -26,9 +27,13 @@ jobs:
       - name: Install dependencies
         run: npm install --production
 
+      - name: Create deployment package
+        run: zip -r deploy.zip . -x "*.git*" ".github/*" "*.md" "scripts/*"
+
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: '.'
+          package: deploy.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}
+          respect-funcignore: true
