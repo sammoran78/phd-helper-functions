@@ -57,6 +57,58 @@ app.http('GetDriveFiles', {
     }
 });
 
+// GET /api/drive/file/{id} - Fetch a Google Doc as HTML
+app.http('GetDriveFile', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'drive/file/{id}',
+    handler: async (request, context) => {
+        try {
+            const fileId = request.params.id;
+            if (!fileId) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'File ID is required' })
+                };
+            }
+
+            const drive = await getDriveClient();
+            const meta = await drive.files.get({ fileId, fields: 'mimeType, name' });
+            const mimeType = meta?.data?.mimeType;
+
+            if (mimeType !== 'application/vnd.google-apps.document') {
+                return {
+                    status: 415,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'Unsupported file type',
+                        details: `Only Google Docs are supported. Found: ${mimeType || 'unknown'}`
+                    })
+                };
+            }
+
+            const response = await drive.files.export(
+                { fileId, mimeType: 'text/html' },
+                { responseType: 'text' }
+            );
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'text/html; charset=utf-8' },
+                body: response.data
+            };
+        } catch (error) {
+            context.error('Get Drive File Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to fetch drive file', details: error.message })
+            };
+        }
+    }
+});
+
 // POST /api/drive/upload - Upload a file to Drive
 app.http('UploadToDrive', {
     methods: ['POST'],
