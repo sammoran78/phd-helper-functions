@@ -92,9 +92,30 @@ app.http('AnalyzeReference', {
             
             // Prepare prompt based on section
             const prompts = {
-                summary: `Please provide a concise academic summary (2-3 paragraphs) of the following research paper. Focus on the main research question, methodology, key findings, and conclusions:\n\n${text.substring(0, 15000)}`,
-                theory: `Please identify and explain the theoretical framework(s) used in this research paper. Include the main theories referenced, how they are applied, and their relevance to the research:\n\n${text.substring(0, 15000)}`,
-                method: `Please describe the research methodology used in this paper. Include the research design, data collection methods, sample/participants, and analysis techniques:\n\n${text.substring(0, 15000)}`
+                summary: `Return a JSON object with keys: "summary" and "keywords".
+"summary" should be a concise academic summary (2-3 paragraphs) focusing on research question, methodology, key findings, and conclusions.
+"keywords" should be a comma-separated list of key terms.
+Respond with JSON only.
+
+Paper text:
+${text.substring(0, 15000)}`,
+                theory: `Return a JSON object with keys: "frameworks", "concepts", "connection".
+"frameworks": theoretical frameworks used.
+"concepts": key concepts/definitions.
+"connection": how this connects to the user's framework.
+Respond with JSON only.
+
+Paper text:
+${text.substring(0, 15000)}`,
+                method: `Return a JSON object with keys: "design", "sample", "analysis", "limitations".
+"design": research design.
+"sample": participants/sample.
+"analysis": analysis techniques.
+"limitations": methodological limitations.
+Respond with JSON only.
+
+Paper text:
+${text.substring(0, 15000)}`
             };
             
             const prompt = prompts[section];
@@ -117,7 +138,8 @@ app.http('AnalyzeReference', {
                     { role: 'system', content: 'You are an academic research assistant helping to analyze scholarly papers.' },
                     { role: 'user', content: prompt }
                 ],
-                max_tokens: 1500,
+                response_format: { type: 'json_object' },
+                max_completion_tokens: 1500,
                 temperature: 0.3
             });
             

@@ -1,9 +1,158 @@
 const { app } = require('@azure/functions');
-const { queryItems } = require('../../shared/cosmosClient');
+const { queryItems, getItem, upsertItem } = require('../../shared/cosmosClient');
+const crypto = require('crypto');
 
 // Shortlist stored in CosmosDB analytics container
 const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const SHORTLIST_ID = 'shortlist';
+const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY;
+
+const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
+
+const getArticleKeys = (article) => {
+    const doiKey = normalizeValue(article?.doi);
+    const titleKey = normalizeValue(article?.title);
+    return { doiKey, titleKey };
+};
+
+const buildDismissedId = (doiKey, titleKey) => {
+    const base = doiKey || titleKey || 'unknown';
+    const hash = crypto.createHash('sha1').update(base).digest('hex');
+    return `dismissed_${hash}`;
+};
+
+const isDismissedArticle = (article, dismissedDois, dismissedTitles) => {
+    const { doiKey, titleKey } = getArticleKeys(article);
+    if (doiKey && dismissedDois.has(doiKey)) return true;
+    if (titleKey && dismissedTitles.has(titleKey)) return true;
+    return false;
+};
+
+const extractTag = (entry, tag) => {
+    const regex = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i');
+    const match = entry.match(regex);
+    return match ? decodeXml(match[1].trim()) : '';
+};
+
+const decodeXml = (value) => (value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+
+const extractDoiFromUrl = (url = '') => {
+    const match = url.match(/doi\.org\/([^?#]+)/i);
+    return match ? match[1].trim() : '';
+};
+
+const parseYearFromText = (text = '') => {
+    const match = text.match(/\b(19|20)\d{2}\b/);
+    return match ? parseInt(match[0], 10) : null;
+};
+
+const parseArxivEntries = (xml) => {
+    const entries = xml.split('<entry>').slice(1);
+    return entries.map(entry => {
+        const title = extractTag(entry, 'title').replace(/\s+/g, ' ').trim();
+        const summary = extractTag(entry, 'summary').replace(/\s+/g, ' ').trim();
+        const published = extractTag(entry, 'published') || extractTag(entry, 'updated');
+        const id = extractTag(entry, 'id');
+        const doi = extractTag(entry, 'arxiv:doi');
+        const authors = Array.from(entry.matchAll(/<name>([^<]+)<\/name>/gi))
+            .map(match => decodeXml(match[1].trim()))
+            .join('; ');
+        return {
+            title,
+            summary,
+            published,
+            id,
+            doi,
+            authors
+        };
+    }).filter(entry => entry.title);
+};
+
+const loadDismissedSets = async (context) => {
+    try {
+        const dismissedItems = await queryItems(REFERENCES_CONTAINER, {
+            query: 'SELECT c.id, c.title, c.doi, c.titleKey, c.doiKey FROM c WHERE c.dismissed = true'
+        });
+        const dismissedDois = new Set();
+        const dismissedTitles = new Set();
+
+        dismissedItems.forEach(item => {
+            const doiKey = normalizeValue(item.doiKey || item.doi);
+            const titleKey = normalizeValue(item.titleKey || item.title);
+            if (doiKey) dismissedDois.add(doiKey);
+            if (titleKey) dismissedTitles.add(titleKey);
+        });
+
+        return { dismissedDois, dismissedTitles };
+    } catch (error) {
+        context?.warn('[Newsreader] Failed to load dismissed items:', error.message);
+        return { dismissedDois: new Set(), dismissedTitles: new Set() };
+    }
+};
+
+const removeFromShortlistByKeys = async (doiKey, titleKey, context) => {
+    if (!doiKey && !titleKey) return;
+    const shortlistDoc = await getItem(SHORTLIST_CONTAINER, SHORTLIST_ID, SHORTLIST_ID);
+    if (!shortlistDoc || !Array.isArray(shortlistDoc.articles)) return;
+
+    const filtered = shortlistDoc.articles.filter(article => {
+        const articleKeys = getArticleKeys(article);
+        if (doiKey && articleKeys.doiKey === doiKey) return false;
+        if (titleKey && articleKeys.titleKey === titleKey) return false;
+        return true;
+    });
+
+    if (filtered.length !== shortlistDoc.articles.length) {
+        shortlistDoc.articles = filtered;
+        await upsertItem(SHORTLIST_CONTAINER, shortlistDoc);
+        context?.log('[Newsreader] Removed dismissed item from shortlist');
+    }
+};
+
+const handleDismissRequest = async (body, context) => {
+    const { doi, title, url, source, authors, year } = body || {};
+    if (!doi && !title) {
+        return {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ error: 'doi or title required' })
+        };
+    }
+
+    const doiKey = normalizeValue(doi);
+    const titleKey = normalizeValue(title);
+    const dismissedId = buildDismissedId(doiKey, titleKey);
+
+    const dismissedDoc = {
+        id: dismissedId,
+        type: 'dismissed',
+        dismissed: true,
+        doi: doi || null,
+        title: title || null,
+        url: url || null,
+        source: source || null,
+        authors: authors || null,
+        year: year || null,
+        doiKey: doiKey || null,
+        titleKey: titleKey || null,
+        dateDismissed: new Date().toISOString()
+    };
+
+    await upsertItem(REFERENCES_CONTAINER, dismissedDoc);
+    await removeFromShortlistByKeys(doiKey, titleKey, context);
+
+    return {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ success: true })
+    };
+};
 
 // GET /api/newsreader/shortlist - Get shortlisted articles
 app.http('GetShortlist', {
@@ -16,8 +165,11 @@ app.http('GetShortlist', {
                 query: 'SELECT * FROM c WHERE c.type = "shortlist"'
             };
             const items = await queryItems(SHORTLIST_CONTAINER, querySpec);
-            const shortlist = items.length > 0 ? (items[0].articles || []) : [];
-            
+            let shortlist = items.length > 0 ? (items[0].articles || []) : [];
+
+            const { dismissedDois, dismissedTitles } = await loadDismissedSets(context);
+            shortlist = shortlist.filter(article => !isDismissedArticle(article, dismissedDois, dismissedTitles));
+
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
@@ -50,27 +202,36 @@ app.http('AddToShortlist', {
                 };
             }
 
-            const { upsertItem, getItem } = require('../../shared/cosmosClient');
-            
-            // Get existing shortlist document or create new
-            let shortlistDoc = await getItem(SHORTLIST_CONTAINER, 'shortlist', 'shortlist');
-            if (!shortlistDoc) {
-                shortlistDoc = { id: 'shortlist', type: 'shortlist', articles: [] };
+            const { doiKey, titleKey } = getArticleKeys(article);
+            const { dismissedDois, dismissedTitles } = await loadDismissedSets(context);
+            if (isDismissedArticle(article, dismissedDois, dismissedTitles)) {
+                return {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ success: true, skipped: true })
+                };
             }
-            
-            // Check for duplicates
-            const exists = shortlistDoc.articles.some(a => 
-                a.doi === article.doi || a.title?.toLowerCase() === article.title?.toLowerCase()
-            );
-            
+
+            let shortlistDoc = await getItem(SHORTLIST_CONTAINER, SHORTLIST_ID, SHORTLIST_ID);
+            if (!shortlistDoc) {
+                shortlistDoc = { id: SHORTLIST_ID, type: 'shortlist', articles: [] };
+            }
+
+            const exists = shortlistDoc.articles.some(a => {
+                const keys = getArticleKeys(a);
+                return (doiKey && keys.doiKey === doiKey) || (titleKey && keys.titleKey === titleKey);
+            });
+
             if (!exists) {
                 shortlistDoc.articles.push({
                     ...article,
+                    doiKey: doiKey || null,
+                    titleKey: titleKey || null,
                     addedAt: new Date().toISOString()
                 });
                 await upsertItem(SHORTLIST_CONTAINER, shortlistDoc);
             }
-            
+
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
@@ -94,10 +255,10 @@ app.http('RemoveFromShortlist', {
     route: 'newsreader/shortlist/{identifier}',
     handler: async (request, context) => {
         try {
-            const identifier = decodeURIComponent(request.params.identifier);
-            const { upsertItem, getItem } = require('../../shared/cosmosClient');
-            
-            let shortlistDoc = await getItem(SHORTLIST_CONTAINER, 'shortlist', 'shortlist');
+            const identifier = decodeURIComponent(request.params.identifier || '');
+            const identifierKey = normalizeValue(identifier);
+
+            let shortlistDoc = await getItem(SHORTLIST_CONTAINER, SHORTLIST_ID, SHORTLIST_ID);
             if (!shortlistDoc) {
                 return {
                     status: 200,
@@ -105,13 +266,16 @@ app.http('RemoveFromShortlist', {
                     body: JSON.stringify({ success: true })
                 };
             }
-            
-            shortlistDoc.articles = shortlistDoc.articles.filter(a => 
-                a.doi !== identifier && a.title?.toLowerCase() !== identifier.toLowerCase()
-            );
-            
+
+            shortlistDoc.articles = shortlistDoc.articles.filter(a => {
+                const keys = getArticleKeys(a);
+                if (identifierKey && keys.doiKey === identifierKey) return false;
+                if (identifierKey && keys.titleKey === identifierKey) return false;
+                return true;
+            });
+
             await upsertItem(SHORTLIST_CONTAINER, shortlistDoc);
-            
+
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
@@ -123,6 +287,26 @@ app.http('RemoveFromShortlist', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to remove from shortlist', details: error.message })
+            };
+        }
+    }
+});
+
+// POST /api/newsreader/dismiss - Mark an article as dismissed
+app.http('DismissNewsreaderArticle', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'newsreader/dismiss',
+    handler: async (request, context) => {
+        try {
+            const body = await request.json();
+            return await handleDismissRequest(body, context);
+        } catch (error) {
+            context.error('Dismiss Article Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to dismiss article', details: error.message })
             };
         }
     }
@@ -154,15 +338,16 @@ app.http('GetNewsreaderArticles', {
             } catch (e) { context.warn('[Newsreader] Could not load shortlist:', e.message); }
             
             // Build sets for filtering
+            const { dismissedDois, dismissedTitles } = await loadDismissedSets(context);
             const existingDOIs = new Set([
                 ...existingRefs.map(r => r.url).filter(u => u && u.includes('doi.org')).map(u => u.replace(/.*doi\.org\//, '')),
                 ...existingRefs.map(r => r.doi).filter(Boolean),
                 ...shortlist.map(s => s.doi).filter(Boolean)
-            ]);
+            ].map(normalizeValue).filter(Boolean));
             const existingTitles = new Set([
                 ...existingRefs.map(r => r.title ? r.title.toLowerCase().trim() : ''),
                 ...shortlist.map(s => s.title ? s.title.toLowerCase().trim() : '')
-            ].filter(t => t));
+            ].map(normalizeValue).filter(Boolean));
             
             // Relevance keywords
             const RELEVANCE_KEYWORDS = [
@@ -254,10 +439,16 @@ app.http('GetNewsreaderArticles', {
                 if (!title || title.length < 10) return false;
                 if (/^[\d\.\s]+$/.test(title)) return false;
                 if (/^title pending/i.test(title)) return false;
-                const titleLower = title.toLowerCase().trim();
-                if (doi && existingDOIs.has(doi)) return false;
-                if (existingTitles.has(titleLower)) return false;
-                if (allArticles.some(a => a.doi === doi || a.title?.toLowerCase() === titleLower)) return false;
+                const titleLower = normalizeValue(title);
+                const doiKey = normalizeValue(doi);
+                if (doiKey && existingDOIs.has(doiKey)) return false;
+                if (titleLower && existingTitles.has(titleLower)) return false;
+                if (doiKey && dismissedDois.has(doiKey)) return false;
+                if (titleLower && dismissedTitles.has(titleLower)) return false;
+                if (allArticles.some(a => {
+                    const keys = getArticleKeys(a);
+                    return (doiKey && keys.doiKey === doiKey) || (titleLower && keys.titleKey === titleLower);
+                })) return false;
                 if (!isRelevantArticle(title, abstract)) return false;
                 return true;
             };
@@ -330,7 +521,9 @@ app.http('GetNewsreaderArticles', {
                             category: sq.category,
                             isNew,
                             publishedDate: pubDate?.toISOString(),
-                            apiSource: 'CrossRef'
+                            apiSource: 'CrossRef',
+                            doiKey: normalizeValue(doi),
+                            titleKey: normalizeValue(title)
                         });
                     }
                 } catch (e) { context.warn('[Newsreader] CrossRef query failed:', sq.query, e.message); }
@@ -373,10 +566,98 @@ app.http('GetNewsreaderArticles', {
                             category: sq.category,
                             isNew,
                             publishedDate: pubDate?.toISOString(),
-                            apiSource: 'Semantic Scholar'
+                            apiSource: 'Semantic Scholar',
+                            doiKey: normalizeValue(doi || paper.paperId),
+                            titleKey: normalizeValue(title)
                         });
                     }
                 } catch (e) { context.warn('[Newsreader] Semantic Scholar query failed:', sq.query, e.message); }
+            }
+
+            // Search Google Scholar via SerpAPI (optional)
+            if (SERPAPI_API_KEY) {
+                for (const sq of searchQueries.slice(0, 3)) {
+                    try {
+                        const serpUrl = `https://serpapi.com/search.json?engine=google_scholar&q=${encodeURIComponent(sq.query)}&api_key=${SERPAPI_API_KEY}`;
+                        const response = await fetch(serpUrl, { headers: { 'User-Agent': 'PhD-Helper/1.0' } });
+                        if (!response.ok) continue;
+                        const data = await response.json();
+                        const results = Array.isArray(data.organic_results) ? data.organic_results : [];
+
+                        for (const item of results) {
+                            const title = item.title;
+                            const link = item.link || '';
+                            const doi = extractDoiFromUrl(link) || '';
+                            const abstract = item.snippet || '';
+                            if (!isValidArticle(title, doi || title, abstract)) continue;
+
+                            const summaryText = item.publication_info?.summary || item.publication_info?.authors || '';
+                            const year = parseYearFromText(summaryText) || parseYearFromText(abstract);
+                            if (!year || year < 2020 || year > 2026) continue;
+
+                            allArticles.push({
+                                doi: doi || link,
+                                title,
+                                authors: item.publication_info?.authors || 'Unknown Author',
+                                year: String(year),
+                                source: 'Google Scholar',
+                                type: 'Article',
+                                abstract: abstract.substring(0, 1000),
+                                url: link,
+                                category: sq.category,
+                                isNew: year >= now.getFullYear() - 1,
+                                publishedDate: null,
+                                apiSource: 'Google Scholar (SerpAPI)',
+                                doiKey: normalizeValue(doi || link),
+                                titleKey: normalizeValue(title)
+                            });
+                        }
+                    } catch (e) { context.warn('[Newsreader] SerpAPI query failed:', sq.query, e.message); }
+                }
+            } else {
+                context.warn('[Newsreader] SERPAPI_API_KEY not set; skipping Google Scholar search.');
+            }
+
+            // Search arXiv (broader preprint coverage)
+            for (const sq of searchQueries.slice(0, 6)) {
+                try {
+                    const arxivQuery = encodeURIComponent(`${sq.query} AND submittedDate:[${fromDate.replace(/-/g, '')}0000 TO ${now.toISOString().slice(0,10).replace(/-/g, '')}2359]`);
+                    const arxivUrl = `https://export.arxiv.org/api/query?search_query=all:${arxivQuery}&start=0&max_results=8&sortBy=submittedDate&sortOrder=descending`;
+                    const response = await fetch(arxivUrl, { headers: { 'User-Agent': 'PhD-Helper/1.0' } });
+                    if (!response.ok) continue;
+                    const xml = await response.text();
+                    const entries = parseArxivEntries(xml);
+
+                    for (const entry of entries) {
+                        const title = entry.title;
+                        const doi = entry.doi || entry.id;
+                        const abstract = entry.summary || '';
+                        if (!isValidArticle(title, doi, abstract)) continue;
+
+                        const publishedDate = entry.published ? new Date(entry.published) : null;
+                        const year = publishedDate ? publishedDate.getFullYear() : null;
+                        if (!year || year < 2020 || year > 2026) continue;
+
+                        const isNew = publishedDate && publishedDate >= ninetyDaysAgo;
+
+                        allArticles.push({
+                            doi: entry.doi || entry.id,
+                            title,
+                            authors: entry.authors || 'Unknown Author',
+                            year: String(year),
+                            source: 'arXiv',
+                            type: 'Preprint',
+                            abstract: abstract.substring(0, 1000),
+                            url: entry.id || (entry.doi ? `https://doi.org/${entry.doi}` : ''),
+                            category: sq.category,
+                            isNew,
+                            publishedDate: publishedDate?.toISOString(),
+                            apiSource: 'arXiv',
+                            doiKey: normalizeValue(entry.doi || entry.id),
+                            titleKey: normalizeValue(title)
+                        });
+                    }
+                } catch (e) { context.warn('[Newsreader] arXiv query failed:', sq.query, e.message); }
             }
             
             // Sort by date (newest first)
@@ -390,12 +671,13 @@ app.http('GetNewsreaderArticles', {
                 results = results.filter(a => a.isNew);
             }
             
-            context.log(`[Newsreader] Found ${results.length} articles (filter: ${filterNew ? 'new' : 'all'})`);
+            const filteredResults = results.filter(article => !isDismissedArticle(article, dismissedDois, dismissedTitles));
+            context.log(`[Newsreader] Found ${filteredResults.length} articles (filter: ${filterNew ? 'new' : 'all'})`);
             
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(results.slice(0, 30))
+                body: JSON.stringify(filteredResults.slice(0, 30))
             };
         } catch (error) {
             context.error('[Newsreader] Articles error:', error);

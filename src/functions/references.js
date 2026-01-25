@@ -2,6 +2,36 @@ const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
+const SHORTLIST_ID = 'shortlist';
+
+const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
+
+const getReferenceKeys = (reference) => {
+    const doiKey = normalizeValue(reference?.doi);
+    const titleKey = normalizeValue(reference?.title);
+    return { doiKey, titleKey };
+};
+
+const removeFromShortlistByKeys = async (doiKey, titleKey, context) => {
+    if (!doiKey && !titleKey) return;
+    const shortlistDoc = await getItem(SHORTLIST_CONTAINER, SHORTLIST_ID, SHORTLIST_ID);
+    if (!shortlistDoc || !Array.isArray(shortlistDoc.articles)) return;
+
+    const filtered = shortlistDoc.articles.filter(article => {
+        const articleDoiKey = normalizeValue(article?.doiKey || article?.doi);
+        const articleTitleKey = normalizeValue(article?.titleKey || article?.title);
+        if (doiKey && articleDoiKey === doiKey) return false;
+        if (titleKey && articleTitleKey === titleKey) return false;
+        return true;
+    });
+
+    if (filtered.length !== shortlistDoc.articles.length) {
+        shortlistDoc.articles = filtered;
+        await upsertItem(SHORTLIST_CONTAINER, shortlistDoc);
+        context?.log('Removed reference from shortlist');
+    }
+};
 
 // GET /api/references - Get all references
 app.http('GetReferences', {
@@ -13,7 +43,7 @@ app.http('GetReferences', {
             context.log('Loading references from CosmosDB');
             
             const querySpec = {
-                query: 'SELECT * FROM c ORDER BY c._ts DESC'
+                query: 'SELECT * FROM c WHERE (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true) ORDER BY c._ts DESC'
             };
             
             const references = await queryItems(CONTAINER_NAME, querySpec);
@@ -52,6 +82,9 @@ app.http('CreateReference', {
             };
             
             const created = await createItem(CONTAINER_NAME, newReference);
+
+            const { doiKey, titleKey } = getReferenceKeys(created);
+            await removeFromShortlistByKeys(doiKey, titleKey, context);
             
             context.log(`Created reference: ${created.id}`);
             
@@ -98,6 +131,11 @@ app.http('UpdateReference', {
             };
             
             const updated = await upsertItem(CONTAINER_NAME, updatedReference);
+
+            const existingKeys = getReferenceKeys(existing);
+            const updatedKeys = getReferenceKeys(updatedReference);
+            await removeFromShortlistByKeys(existingKeys.doiKey, existingKeys.titleKey, context);
+            await removeFromShortlistByKeys(updatedKeys.doiKey, updatedKeys.titleKey, context);
             
             context.log(`Updated reference: ${id}`);
             

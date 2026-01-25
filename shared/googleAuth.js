@@ -24,6 +24,7 @@ function getServiceAccountAuth() {
     
     let serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
     if (!serviceAccountJson) {
+        console.warn('[GoogleAuth] GOOGLE_SERVICE_ACCOUNT_JSON not set');
         return null;
     }
     
@@ -34,6 +35,7 @@ function getServiceAccountAuth() {
         }
         
         const credentials = JSON.parse(serviceAccountJson);
+        console.log('[GoogleAuth] Service account loaded:', credentials.client_email);
         cachedServiceAuth = new google.auth.GoogleAuth({
             credentials,
             scopes: SCOPES
@@ -49,8 +51,8 @@ function getServiceAccountAuth() {
  * Get OAuth2 client with credentials from environment variables
  */
 function getOAuth2Client() {
-    const clientId = process.env.GOOGLE_CLIENT_ID;
-    const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+    const clientId = process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_OAUTH_CLIENT_ID;
+    const clientSecret = process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_OAUTH_CLIENT_SECRET;
     
     if (!clientId || !clientSecret) {
         return null;
@@ -67,7 +69,7 @@ async function getOAuthClient() {
     const oauth2Client = getOAuth2Client();
     if (!oauth2Client) return null;
     
-    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN || process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
     if (!refreshToken) return null;
     
     // Check if we have a cached valid token
@@ -98,15 +100,18 @@ async function getAuthenticatedClient() {
     // Try service account first (better for server-side)
     const serviceAuth = getServiceAccountAuth();
     if (serviceAuth) {
+        console.log('[GoogleAuth] Using service account authentication');
         return serviceAuth;
     }
     
     // Fall back to OAuth
     const oauthClient = await getOAuthClient();
     if (oauthClient) {
+        console.log('[GoogleAuth] Using OAuth authentication');
         return oauthClient;
     }
     
+    console.error('[GoogleAuth] No authentication method configured');
     throw new Error('No Google authentication configured. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN');
 }
 
