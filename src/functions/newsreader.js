@@ -10,6 +10,19 @@ const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY;
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
 
+const STOPWORDS = new Set([
+    'about', 'above', 'after', 'again', 'against', 'between', 'beyond', 'could', 'should', 'would',
+    'these', 'those', 'their', 'there', 'where', 'which', 'while', 'with', 'without', 'using',
+    'study', 'studies', 'paper', 'papers', 'research', 'analysis', 'review', 'approach', 'model',
+    'system', 'method', 'methods', 'results', 'effect', 'effects', 'based', 'towards', 'future'
+]);
+
+const tokenizeText = (text = '') => text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length > 3 && !STOPWORDS.has(token));
+
 const decodeIdentifier = (value = '') => {
     try {
         return decodeURIComponent(value);
@@ -126,18 +139,24 @@ const loadDismissedSets = async (context) => {
         });
         const dismissedDois = new Set();
         const dismissedTitles = new Set();
+        const dismissedTokenSets = [];
 
         dismissedItems.forEach(item => {
             const doiKey = normalizeValue(item.doiKey || item.doi);
             const titleKey = normalizeValue(item.titleKey || item.title);
             if (doiKey) dismissedDois.add(doiKey);
             if (titleKey) dismissedTitles.add(titleKey);
+
+            const tokens = tokenizeText(item.title || '');
+            if (tokens.length > 0) {
+                dismissedTokenSets.push(new Set(tokens));
+            }
         });
 
-        return { dismissedDois, dismissedTitles };
+        return { dismissedDois, dismissedTitles, dismissedTokenSets };
     } catch (error) {
         context?.warn('[Newsreader] Failed to load dismissed items:', error.message);
-        return { dismissedDois: new Set(), dismissedTitles: new Set() };
+        return { dismissedDois: new Set(), dismissedTitles: new Set(), dismissedTokenSets: [] };
     }
 };
 
@@ -407,7 +426,7 @@ app.http('GetNewsreaderArticles', {
             } catch (e) { context.warn('[Newsreader] Could not load shortlist:', e.message); }
             
             // Build sets for filtering
-            const { dismissedDois, dismissedTitles } = await loadDismissedSets(context);
+            const { dismissedDois, dismissedTitles, dismissedTokenSets } = await loadDismissedSets(context);
             const existingDOIs = new Set([
                 ...existingRefs.map(r => r.url).filter(u => u && u.includes('doi.org')).map(u => u.replace(/.*doi\.org\//, '')),
                 ...existingRefs.map(r => r.doi).filter(Boolean),
@@ -504,6 +523,21 @@ app.http('GetNewsreaderArticles', {
                 ? sixMonthsAgo.toISOString().split('T')[0]
                 : oneYearAgo.toISOString().split('T')[0];
             
+            const isTooSimilarToDismissed = (title) => {
+                if (!title || dismissedTokenSets.length === 0) return false;
+                const titleTokens = tokenizeText(title);
+                if (titleTokens.length === 0) return false;
+
+                return dismissedTokenSets.some(tokensSet => {
+                    const requiredMatches = Math.min(3, Math.max(2, Math.ceil(tokensSet.size * 0.6)));
+                    let matches = 0;
+                    titleTokens.forEach(token => {
+                        if (tokensSet.has(token)) matches += 1;
+                    });
+                    return matches >= requiredMatches;
+                });
+            };
+
             const isValidArticle = (title, doi, abstract = '') => {
                 if (!title || title.length < 10) return false;
                 if (/^[\d\.\s]+$/.test(title)) return false;
@@ -514,6 +548,7 @@ app.http('GetNewsreaderArticles', {
                 if (titleLower && existingTitles.has(titleLower)) return false;
                 if (doiKey && dismissedDois.has(doiKey)) return false;
                 if (titleLower && dismissedTitles.has(titleLower)) return false;
+                if (isTooSimilarToDismissed(title)) return false;
                 if (allArticles.some(a => {
                     const keys = getArticleKeys(a);
                     return (doiKey && keys.doiKey === doiKey) || (titleLower && keys.titleKey === titleLower);
