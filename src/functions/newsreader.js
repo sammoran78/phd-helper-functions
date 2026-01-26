@@ -10,10 +10,55 @@ const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY;
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
 
+const decodeIdentifier = (value = '') => {
+    try {
+        return decodeURIComponent(value);
+    } catch (error) {
+        return value;
+    }
+};
+
 const getArticleKeys = (article) => {
     const doiKey = normalizeValue(article?.doi);
     const titleKey = normalizeValue(article?.title);
     return { doiKey, titleKey };
+};
+
+const removeFromShortlistByIdentifierKey = async (identifierKey, context) => {
+    if (!identifierKey) return;
+    let shortlistDoc = await getItem(SHORTLIST_CONTAINER, SHORTLIST_ID, SHORTLIST_ID);
+    if (!shortlistDoc || !Array.isArray(shortlistDoc.articles)) return;
+
+    const filtered = shortlistDoc.articles.filter(article => {
+        const keys = getArticleKeys(article);
+        if (identifierKey && keys.doiKey === identifierKey) return false;
+        if (identifierKey && keys.titleKey === identifierKey) return false;
+        return true;
+    });
+
+    if (filtered.length !== shortlistDoc.articles.length) {
+        shortlistDoc.articles = filtered;
+        await upsertItem(SHORTLIST_CONTAINER, shortlistDoc);
+        context?.log('[Newsreader] Removed item from shortlist');
+    }
+};
+
+const getIdentifierKeyFromRequest = async (request) => {
+    const queryIdentifier = request.query?.get?.('identifier') || request.query?.identifier;
+    let bodyIdentifier = null;
+
+    if (!queryIdentifier) {
+        try {
+            const body = await request.json();
+            bodyIdentifier = body?.identifier || body?.doi || body?.title;
+        } catch (error) {
+            bodyIdentifier = null;
+        }
+    }
+
+    const rawIdentifier = request.params?.identifier || queryIdentifier || bodyIdentifier;
+    if (!rawIdentifier) return null;
+    return normalizeValue(decodeIdentifier(rawIdentifier));
 };
 
 const buildDismissedId = (doiKey, titleKey) => {
@@ -186,6 +231,40 @@ app.http('GetShortlist', {
     }
 });
 
+// DELETE /api/newsreader/shortlist?identifier=... - Remove from shortlist (query/body)
+app.http('RemoveFromShortlistByQuery', {
+    methods: ['DELETE'],
+    authLevel: 'anonymous',
+    route: 'newsreader/shortlist',
+    handler: async (request, context) => {
+        try {
+            const identifierKey = await getIdentifierKeyFromRequest(request);
+            if (!identifierKey) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'identifier required' })
+                };
+            }
+
+            await removeFromShortlistByIdentifierKey(identifierKey, context);
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ success: true })
+            };
+        } catch (error) {
+            context.error('Remove from Shortlist Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to remove from shortlist', details: error.message })
+            };
+        }
+    }
+});
+
 // POST /api/newsreader/shortlist - Add article to shortlist
 app.http('AddToShortlist', {
     methods: ['POST'],
@@ -255,26 +334,16 @@ app.http('RemoveFromShortlist', {
     route: 'newsreader/shortlist/{identifier}',
     handler: async (request, context) => {
         try {
-            const identifier = decodeURIComponent(request.params.identifier || '');
-            const identifierKey = normalizeValue(identifier);
-
-            let shortlistDoc = await getItem(SHORTLIST_CONTAINER, SHORTLIST_ID, SHORTLIST_ID);
-            if (!shortlistDoc) {
+            const identifierKey = await getIdentifierKeyFromRequest(request);
+            if (!identifierKey) {
                 return {
-                    status: 200,
+                    status: 400,
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ success: true })
+                    body: JSON.stringify({ error: 'identifier required' })
                 };
             }
 
-            shortlistDoc.articles = shortlistDoc.articles.filter(a => {
-                const keys = getArticleKeys(a);
-                if (identifierKey && keys.doiKey === identifierKey) return false;
-                if (identifierKey && keys.titleKey === identifierKey) return false;
-                return true;
-            });
-
-            await upsertItem(SHORTLIST_CONTAINER, shortlistDoc);
+            await removeFromShortlistByIdentifierKey(identifierKey, context);
 
             return {
                 status: 200,
