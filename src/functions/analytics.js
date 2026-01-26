@@ -7,6 +7,79 @@ const { app } = require('@azure/functions');
 const { getItem, upsertItem, queryItems } = require('../../shared/cosmosClient');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
+const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const LANDSCAPE_DOC_ID = 'analytics_landscape';
+const LANDSCAPE_TTL_MS = 24 * 60 * 60 * 1000;
+
+const isLandscapeStale = (dateGenerated) => {
+    if (!dateGenerated) return true;
+    const timestamp = new Date(dateGenerated).getTime();
+    if (Number.isNaN(timestamp)) return true;
+    return Date.now() - timestamp > LANDSCAPE_TTL_MS;
+};
+
+const toLandscapeReference = (ref) => ({
+    id: ref.id,
+    title: ref.title,
+    authors: ref.authors,
+    year: ref.year,
+    source: ref.source,
+    tags: ref.tags,
+    keywords: ref.keywords,
+    discipline: ref.discipline,
+    frameworks: ref.frameworks,
+    concepts: ref.concepts,
+    summary: ref.summary
+});
+
+const buildLandscapeSnapshot = async (context) => {
+    const query = 'SELECT * FROM c WHERE NOT IS_DEFINED(c.dismissed) OR c.dismissed != true';
+    const references = await queryItems(REFERENCES_CONTAINER, { query });
+    const snapshot = {
+        id: LANDSCAPE_DOC_ID,
+        type: 'landscape',
+        dateGenerated: new Date().toISOString(),
+        referenceCount: references.length,
+        references: references.map(toLandscapeReference)
+    };
+
+    await upsertItem(CONTAINER_NAME, snapshot);
+    context?.log(`Saved analytics landscape snapshot with ${references.length} references`);
+    return snapshot;
+};
+
+// GET /api/analytics/landscape - Get cached landscape snapshot (refresh daily or manually)
+app.http('GetAnalyticsLandscape', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'analytics/landscape',
+    handler: async (request, context) => {
+        try {
+            const url = new URL(request.url);
+            const refreshParam = url.searchParams.get('refresh');
+            const forceRefresh = refreshParam === 'true' || refreshParam === '1';
+
+            let snapshot = await getItem(CONTAINER_NAME, LANDSCAPE_DOC_ID, LANDSCAPE_DOC_ID);
+
+            if (!snapshot || forceRefresh || isLandscapeStale(snapshot.dateGenerated)) {
+                snapshot = await buildLandscapeSnapshot(context);
+            }
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(snapshot)
+            };
+        } catch (error) {
+            context.error('Get Analytics Landscape Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to retrieve analytics landscape', details: error.message })
+            };
+        }
+    }
+});
 
 // GET /api/analytics - Get latest analytics
 app.http('GetAnalytics', {
@@ -63,7 +136,7 @@ app.http('UpsertAnalytics', {
                 dateGenerated: body.dateGenerated || new Date().toISOString()
             };
             
-            const result = await upsertItem(CONTAINER_NAME, id, analyticsData);
+            const result = await upsertItem(CONTAINER_NAME, analyticsData);
             
             context.log(`Upserted analytics: ${id}`);
             
@@ -91,8 +164,7 @@ app.http('AnalyzeCorpus', {
     handler: async (request, context) => {
         try {
             // Get all references from CosmosDB
-            const referencesContainer = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
-            const references = await queryItems(referencesContainer, 'SELECT * FROM c');
+            const references = await queryItems(REFERENCES_CONTAINER, 'SELECT * FROM c');
             
             context.log(`Analyzing ${references.length} references`);
             
