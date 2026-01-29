@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_NAME: 'phd-functions'
+  AZURE_FUNCTIONAPP_NAME: 'phd-helper-functions-hwgefgecf9gjced3'
   AZURE_RESOURCE_GROUP: 'phdhelper-AUeast'
   NODE_VERSION: '20.x'
 
@@ -35,7 +35,7 @@ jobs:
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: deploy.zip
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_01F52EBCB41344ED8B40123B4B8AB9F9 }}
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
           respect-funcignore: true
           scm-do-build-during-deployment: false
           enable-oryx-build: false
