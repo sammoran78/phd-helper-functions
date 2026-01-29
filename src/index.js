@@ -8,3 +8,4 @@ require('./functions/analytics');
 require('./functions/surveys');
 require('./functions/projects');
 require('./functions/ai');
+// require('./functions/kb-pipeline'); // Temporarily disabled - mupdf causing startup crash
