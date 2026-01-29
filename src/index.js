@@ -7,3 +7,4 @@ require('./functions/newsreader');
 require('./functions/analytics');
 require('./functions/surveys');
 require('./functions/projects');
+require('./functions/ai');
