@@ -40,18 +40,54 @@ jobs:
           PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
           PUBLISH_HOST=${PUBLISH_URL%%:*}
           KUDU_URL="https://${PUBLISH_HOST}/api/zipdeploy"
+          SETTINGS_URL="https://${PUBLISH_HOST}/api/settings"
+          DEPLOYMENTS_URL="https://${PUBLISH_HOST}/api/deployments"
           
           echo "Deploying to $KUDU_URL..."
+
+          echo "Preflight: checking Kudu settings for WEBSITE_RUN_FROM_PACKAGE..."
+          curl -sS --user "$USERNAME:$PASSWORD" "$SETTINGS_URL" | (grep -i "WEBSITE_RUN_FROM_PACKAGE" || true)
+
+          echo "Preflight: checking for in-progress deployments..."
+          # Kudu returns 409 frequently when a deployment is already running.
+          # Poll deployments for up to 2 minutes to let any existing deployment finish.
+          for i in {1..24}; do
+            IN_PROGRESS=$(curl -sS --user "$USERNAME:$PASSWORD" "$DEPLOYMENTS_URL" | grep -E '"status"\s*:\s*3' || true)
+            if [ -z "$IN_PROGRESS" ]; then
+              echo "No in-progress deployments detected."
+              break
+            fi
+            echo "Deployment in progress detected; waiting 5s..."
+            sleep 5
+          done
           
           # Deploy using curl with basic auth
-          curl -X POST "$KUDU_URL" \
-            --user "$USERNAME:$PASSWORD" \
-            --header "Content-Type: application/zip" \
-            --data-binary @deploy.zip \
-            --fail \
-            --show-error \
-            --silent \
-            --output /dev/null \
-            --write-out "HTTP Status: %{http_code}\n"
+          # Kudu may return 202 with an async deployment, or 409 if a deployment is running.
+          for attempt in 1 2 3 4 5; do
+            echo "ZipDeploy attempt $attempt..."
+            HTTP_CODE=$(curl -X POST "$KUDU_URL" \
+              --user "$USERNAME:$PASSWORD" \
+              --header "Content-Type: application/zip" \
+              --data-binary @deploy.zip \
+              --silent \
+              --show-error \
+              --output kudu_response.txt \
+              --write-out "%{http_code}")
+            echo "HTTP Status: $HTTP_CODE"
+            echo "Kudu response body:"
+            cat kudu_response.txt || true
+            
+            if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "202" ]; then
+              echo "ZipDeploy accepted."
+              break
+            fi
+            if [ "$HTTP_CODE" = "409" ]; then
+              echo "Got 409 Conflict (likely deployment in progress). Waiting 10s then retrying..."
+              sleep 10
+              continue
+            fi
+            echo "ZipDeploy failed with status $HTTP_CODE"
+            exit 1
+          done
           
           echo "Deployment complete!"
