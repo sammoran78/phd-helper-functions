@@ -30,12 +30,26 @@ jobs:
       - name: Create deployment package
         run: zip -r deploy.zip . -x "*.git*" ".github/*" "*.md" "scripts/*"
 
-      - name: Deploy to Azure Functions
-        uses: Azure/functions-action@v1
-        with:
-          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
-          package: deploy.zip
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-          respect-funcignore: true
-          scm-do-build-during-deployment: false
-          enable-oryx-build: false
+      - name: Deploy to Azure Functions via Kudu
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+        run: |
+          # Extract credentials from publish profile
+          USERNAME=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
+          PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
+          KUDU_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}.scm.azurewebsites.net/api/zipdeploy"
+          
+          echo "Deploying to $KUDU_URL..."
+          
+          # Deploy using curl with basic auth
+          curl -X POST "$KUDU_URL" \
+            --user "$USERNAME:$PASSWORD" \
+            --header "Content-Type: application/zip" \
+            --data-binary @deploy.zip \
+            --fail \
+            --show-error \
+            --silent \
+            --output /dev/null \
+            --write-out "HTTP Status: %{http_code}\n"
+          
+          echo "Deployment complete!"
