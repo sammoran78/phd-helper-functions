@@ -37,7 +37,9 @@ jobs:
           # Extract credentials from publish profile
           USERNAME=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
           PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
-          KUDU_URL="https://${{ env.AZURE_FUNCTIONAPP_NAME }}.scm.azurewebsites.net/api/zipdeploy"
+          PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
+          PUBLISH_HOST=${PUBLISH_URL%%:*}
+          KUDU_URL="https://${PUBLISH_HOST}/api/zipdeploy"
           
           echo "Deploying to $KUDU_URL..."
           
