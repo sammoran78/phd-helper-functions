@@ -39,6 +39,9 @@ jobs:
           PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
           PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
           PUBLISH_HOST=${PUBLISH_URL%%:*}
+          export USERNAME
+          export PASSWORD
+          export PUBLISH_HOST
           KUDU_URL="https://${PUBLISH_HOST}/api/zipdeploy"
           SETTINGS_URL="https://${PUBLISH_HOST}/api/settings"
           DEPLOYMENTS_URL="https://${PUBLISH_HOST}/api/deployments"
@@ -46,7 +49,29 @@ jobs:
           echo "Deploying to $KUDU_URL..."
 
           echo "Preflight: checking Kudu settings for WEBSITE_RUN_FROM_PACKAGE..."
-          curl -sS --user "$USERNAME:$PASSWORD" "$SETTINGS_URL" | (grep -i "WEBSITE_RUN_FROM_PACKAGE" || true)
+          python - <<'PY'
+          import json, os, sys, urllib.request, base64
+          host = os.environ.get('PUBLISH_HOST')
+          user = os.environ.get('USERNAME')
+          pwd = os.environ.get('PASSWORD')
+          url = f"https://{host}/api/settings"
+          req = urllib.request.Request(url)
+          token = base64.b64encode(f"{user}:{pwd}".encode()).decode()
+          req.add_header('Authorization', f'Basic {token}')
+          with urllib.request.urlopen(req) as r:
+              data = json.loads(r.read().decode())
+          v = data.get('WEBSITE_RUN_FROM_PACKAGE') or data.get('WEBSITE_USE_ZIP')
+          if not v:
+              print('WEBSITE_RUN_FROM_PACKAGE/WEBSITE_USE_ZIP: (not set)')
+          else:
+              s = str(v)
+              # Redact URL/token contents but keep enough to diagnose
+              if s.startswith('http'):
+                  print('WEBSITE_RUN_FROM_PACKAGE/WEBSITE_USE_ZIP: (set to remote URL)')
+              else:
+                  print(f'WEBSITE_RUN_FROM_PACKAGE/WEBSITE_USE_ZIP: {s}')
+          PY
+
 
           echo "Preflight: checking for in-progress deployments..."
           # Kudu returns 409 frequently when a deployment is already running.
@@ -63,6 +88,7 @@ jobs:
           
           # Deploy using curl with basic auth
           # Kudu may return 202 with an async deployment, or 409 if a deployment is running.
+          DEPLOY_ACCEPTED=0
           for attempt in 1 2 3 4 5; do
             echo "ZipDeploy attempt $attempt..."
             HTTP_CODE=$(curl -X POST "$KUDU_URL" \
@@ -79,6 +105,7 @@ jobs:
             
             if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "202" ]; then
               echo "ZipDeploy accepted."
+              DEPLOY_ACCEPTED=1
               break
             fi
             if [ "$HTTP_CODE" = "409" ]; then
@@ -89,5 +116,10 @@ jobs:
             echo "ZipDeploy failed with status $HTTP_CODE"
             exit 1
           done
-          
-          echo "Deployment complete!"
+
+          if [ "$DEPLOY_ACCEPTED" != "1" ]; then
+            echo "Deployment NOT accepted by Kudu after retries."
+            exit 1
+          fi
+
+          echo "Deployment accepted by Kudu."
