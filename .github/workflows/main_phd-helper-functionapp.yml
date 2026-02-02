@@ -4,14 +4,12 @@
 name: Build and deploy Node.js project to Azure Function App - phd-helper-functionapp
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # set this to the path to your web app project, defaults to the repository root
-  NODE_VERSION: '22.x' # set this to the node version to use (supports 8.x, 10.x, 12.x)
+  AZURE_FUNCTIONAPP_NAME: 'phd-helper-functionapp-cddnghc8cjdrd0fk'
+  NODE_VERSION: '20.x' # set this to the node version to use (supports 8.x, 10.x, 12.x)
 
 jobs:
   build:
@@ -56,16 +54,34 @@ jobs:
         with:
           name: node-app
 
-      - name: Unzip artifact for deployment
+      - name: Deploy to Azure Functions via Kudu (zipdeploy)
+        env:
+          PUBLISH_PROFILE: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
         run: |
-          unzip release.zip
-          rm release.zip
-      
-      - name: 'Run Azure Functions Action'
-        uses: Azure/functions-action@v1
-        id: fa
-        with:
-          app-name: 'phd-helper-functionapp'
-          slot-name: 'Production'
-          package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_340AAA537B3F4CA483C2DF8768977875 }}
+          USERNAME=$(echo "$PUBLISH_PROFILE" | grep -oP 'userName="\K[^"]+' | head -1)
+          PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
+          PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
+          PUBLISH_HOST=${PUBLISH_URL%%:*}
+
+          KUDU_URL="https://${PUBLISH_HOST}/api/zipdeploy"
+          echo "Deploying to $KUDU_URL..."
+
+          HTTP_CODE=$(curl -X POST "$KUDU_URL" \
+            --user "$USERNAME:$PASSWORD" \
+            --header "Content-Type: application/zip" \
+            --data-binary @release.zip \
+            --silent \
+            --show-error \
+            --output kudu_response.txt \
+            --write-out "%{http_code}")
+
+          echo "HTTP Status: $HTTP_CODE"
+          echo "Kudu response body:"
+          cat kudu_response.txt || true
+
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "202" ]; then
+            echo "Deployment failed"
+            exit 1
+          fi
+
+          echo "Deployment accepted by Kudu."
