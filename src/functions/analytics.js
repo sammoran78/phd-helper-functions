@@ -64,7 +64,7 @@ app.http('GetAnalyticsLandscape', {
             if (!snapshot || forceRefresh || isLandscapeStale(snapshot.dateGenerated)) {
                 snapshot = await buildLandscapeSnapshot(context);
             }
-
+// FIXED syntax?
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
