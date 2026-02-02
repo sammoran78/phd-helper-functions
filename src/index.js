@@ -8,4 +8,6 @@ require('./functions/analytics');
 require('./functions/surveys');
 require('./functions/projects');
 require('./functions/ai');
-require('./functions/kb-pipeline');
+if (process.env.ENABLE_KB_PIPELINE === '1') {
+    require('./functions/kb-pipeline');
+}
