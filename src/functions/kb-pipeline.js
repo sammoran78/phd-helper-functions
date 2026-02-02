@@ -2,12 +2,32 @@ const { app } = require('@azure/functions');
 const { downloadBlob, uploadBlob } = require('../../shared/blobClient');
 const { getItem, upsertItem, createItem } = require('../../shared/cosmosClient');
 
-// pdf.js + node-canvas for PDF rendering
-const { createCanvas } = require('canvas');
-const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.mjs');
+// pdf.js + node-canvas for PDF rendering (lazy loaded to prevent startup crash)
+let createCanvas = null;
+let pdfjsLib = null;
+let pdfLibsLoaded = false;
+let pdfLibsError = null;
 
-// Disable worker for Node.js environment
-pdfjsLib.GlobalWorkerOptions.workerSrc = false;
+async function loadPdfLibs() {
+    if (pdfLibsLoaded) return !pdfLibsError;
+    if (pdfLibsError) return false;
+    
+    try {
+        const canvasModule = require('canvas');
+        createCanvas = canvasModule.createCanvas;
+        
+        // Use dynamic import for ES module
+        pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
+        pdfjsLib.GlobalWorkerOptions.workerSrc = false;
+        
+        pdfLibsLoaded = true;
+        return true;
+    } catch (e) {
+        pdfLibsError = e.message;
+        console.error('Failed to load PDF libraries:', e.message);
+        return false;
+    }
+}
 
 // Custom canvas factory for node-canvas
 class NodeCanvasFactory {
@@ -46,6 +66,19 @@ app.http('KBSplitPDF', {
         context.log(`[KB Split PDF] Starting for reference: ${referenceId}`);
         
         try {
+            // 0. Load PDF libraries (lazy load to prevent startup crash)
+            const libsLoaded = await loadPdfLibs();
+            if (!libsLoaded) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'PDF splitting is unavailable',
+                        details: pdfLibsError || 'Failed to load PDF libraries'
+                    })
+                };
+            }
+            
             // 1. Fetch the reference from CosmosDB
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
