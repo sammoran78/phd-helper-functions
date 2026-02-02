@@ -73,19 +73,6 @@ jobs:
           PY
 
 
-          echo "Preflight: checking for in-progress deployments..."
-          # Kudu returns 409 frequently when a deployment is already running.
-          # Poll deployments for up to 2 minutes to let any existing deployment finish.
-          for i in {1..24}; do
-            IN_PROGRESS=$(curl -sS --user "$USERNAME:$PASSWORD" "$DEPLOYMENTS_URL" | grep -E '"status"\s*:\s*3' || true)
-            if [ -z "$IN_PROGRESS" ]; then
-              echo "No in-progress deployments detected."
-              break
-            fi
-            echo "Deployment in progress detected; waiting 5s..."
-            sleep 5
-          done
-          
           # Deploy using curl with basic auth
           # Kudu may return 202 with an async deployment, or 409 if a deployment is running.
           DEPLOY_ACCEPTED=0
