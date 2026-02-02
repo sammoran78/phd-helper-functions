@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_NAME: 'phd-helper-functions-hwgefgecf9gjced3'
+  AZURE_FUNCTIONAPP_NAME: 'phd-helper-functionapp-cddnghc8cjdrd0fk'
   AZURE_RESOURCE_GROUP: 'phdhelper-AUeast'
   NODE_VERSION: '20.x'
 
