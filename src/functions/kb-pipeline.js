@@ -1,11 +1,31 @@
 const { app } = require('@azure/functions');
 const { downloadBlob, uploadBlob } = require('../../shared/blobClient');
 const { getItem, upsertItem, createItem } = require('../../shared/cosmosClient');
-let mupdf = null;
-try {
-    mupdf = require('mupdf');
-} catch (e) {
-    mupdf = null;
+
+// pdf.js + node-canvas for PDF rendering
+const { createCanvas } = require('canvas');
+const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.mjs');
+
+// Disable worker for Node.js environment
+pdfjsLib.GlobalWorkerOptions.workerSrc = false;
+
+// Custom canvas factory for node-canvas
+class NodeCanvasFactory {
+    create(width, height) {
+        const canvas = createCanvas(width, height);
+        const context = canvas.getContext('2d');
+        return { canvas, context };
+    }
+    reset(canvasAndContext, width, height) {
+        canvasAndContext.canvas.width = width;
+        canvasAndContext.canvas.height = height;
+    }
+    destroy(canvasAndContext) {
+        canvasAndContext.canvas.width = 0;
+        canvasAndContext.canvas.height = 0;
+        canvasAndContext.canvas = null;
+        canvasAndContext.context = null;
+    }
 }
 
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
@@ -24,17 +44,6 @@ app.http('KBSplitPDF', {
         context.log(`[KB Split PDF] Starting for reference: ${referenceId}`);
         
         try {
-            if (!mupdf) {
-                return {
-                    status: 500,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        error: 'PDF splitting is unavailable on this deployment target',
-                        details: 'MuPDF failed to load in the Functions runtime. This is commonly due to native module incompatibility in Azure.'
-                    })
-                };
-            }
-
             // 1. Fetch the reference from CosmosDB
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
@@ -91,10 +100,10 @@ app.http('KBSplitPDF', {
                 };
             }
             
-            // 4. Open PDF with MuPDF and get page count
-            context.log('[KB Split PDF] Opening PDF with MuPDF...');
-            const doc = mupdf.Document.openDocument(pdfBuffer, 'application/pdf');
-            const totalPages = doc.countPages();
+            // 4. Open PDF with pdf.js and get page count
+            context.log('[KB Split PDF] Opening PDF with pdf.js...');
+            const pdfDoc = await pdfjsLib.getDocument({ data: pdfBuffer }).promise;
+            const totalPages = pdfDoc.numPages;
             
             context.log(`[KB Split PDF] PDF has ${totalPages} pages`);
             
@@ -108,30 +117,38 @@ app.http('KBSplitPDF', {
             };
             
             const processedPages = [];
+            const canvasFactory = new NodeCanvasFactory();
             
             // 6. Loop through each page
             for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
                 context.log(`[KB Split PDF] Processing page ${pageNum}/${totalPages}`);
                 
                 try {
-                    // Get the page (0-indexed in MuPDF)
-                    const page = doc.loadPage(pageNum - 1);
+                    // Get the page (1-indexed in pdf.js)
+                    const page = await pdfDoc.getPage(pageNum);
                     
-                    // Get page bounds and calculate scale for 300 DPI
-                    // Default PDF is 72 DPI, so scale = 300/72 ≈ 4.17
-                    const bounds = page.getBounds();
+                    // Get viewport at 300 DPI (default is 72 DPI, so scale = 300/72 ≈ 4.17)
                     const scale = 300 / 72;
+                    const viewport = page.getViewport({ scale });
                     
-                    // Create pixmap (render page to image)
-                    const pixmap = page.toPixmap(
-                        mupdf.Matrix.scale(scale, scale),
-                        mupdf.ColorSpace.DeviceRGB,
-                        false, // no alpha
-                        true   // use annotations
+                    // Create canvas for rendering
+                    const canvasAndContext = canvasFactory.create(
+                        Math.floor(viewport.width),
+                        Math.floor(viewport.height)
                     );
                     
-                    // Convert to JPEG with 90% quality
-                    const jpegBuffer = pixmap.asJPEG(90);
+                    // Render page to canvas
+                    await page.render({
+                        canvasContext: canvasAndContext.context,
+                        viewport: viewport,
+                        canvasFactory: canvasFactory
+                    }).promise;
+                    
+                    // Convert canvas to JPEG buffer
+                    const jpegBuffer = canvasAndContext.canvas.toBuffer('image/jpeg', { quality: 0.9 });
+                    
+                    // Clean up canvas
+                    canvasFactory.destroy(canvasAndContext);
                     
                     // Generate blob name for this page
                     const paddedPageNum = String(pageNum).padStart(4, '0');
@@ -142,7 +159,7 @@ app.http('KBSplitPDF', {
                     const blobUrl = await uploadBlob(
                         BLOB_CONTAINER_PAGES,
                         pageBlobName,
-                        Buffer.from(jpegBuffer),
+                        jpegBuffer,
                         'image/jpeg'
                     );
                     

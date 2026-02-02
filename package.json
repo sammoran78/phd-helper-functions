@@ -15,7 +15,8 @@
     "mammoth": "^1.6.0",
     "openai": "^4.20.1",
     "pdf-parse": "^1.1.1",
-    "mupdf": "^0.3.0"
+    "pdfjs-dist": "^4.0.379",
+    "canvas": "^2.11.2"
   },
   "devDependencies": {
     "dotenv": "^17.2.3"
