@@ -1,52 +1,7 @@
 const { app } = require('@azure/functions');
 const { downloadBlob, uploadBlob } = require('../../shared/blobClient');
 const { getItem, upsertItem, createItem } = require('../../shared/cosmosClient');
-
-// pdf.js + node-canvas for PDF rendering (lazy loaded to prevent startup crash)
-let createCanvas = null;
-let pdfjsLib = null;
-let pdfLibsLoaded = false;
-let pdfLibsError = null;
-
-async function loadPdfLibs() {
-    if (pdfLibsLoaded) return !pdfLibsError;
-    if (pdfLibsError) return false;
-    
-    try {
-        const canvasModule = require('canvas');
-        createCanvas = canvasModule.createCanvas;
-        
-        // Use dynamic import for ES module
-        pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
-        pdfjsLib.GlobalWorkerOptions.workerSrc = false;
-        
-        pdfLibsLoaded = true;
-        return true;
-    } catch (e) {
-        pdfLibsError = e.message;
-        console.error('Failed to load PDF libraries:', e.message);
-        return false;
-    }
-}
-
-// Custom canvas factory for node-canvas
-class NodeCanvasFactory {
-    create(width, height) {
-        const canvas = createCanvas(width, height);
-        const context = canvas.getContext('2d');
-        return { canvas, context };
-    }
-    reset(canvasAndContext, width, height) {
-        canvasAndContext.canvas.width = width;
-        canvasAndContext.canvas.height = height;
-    }
-    destroy(canvasAndContext) {
-        canvasAndContext.canvas.width = 0;
-        canvasAndContext.canvas.height = 0;
-        canvasAndContext.canvas = null;
-        canvasAndContext.context = null;
-    }
-}
+const { PDFDocument } = require('pdf-lib');
 
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
@@ -55,7 +10,7 @@ const BLOB_CONTAINER_UPLOADS = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
 const BLOB_CONTAINER_PAGES = process.env.BLOB_CONTAINER_PAGES || 'pages';
 const JOB_TTL_SECONDS = 300; // Auto-delete job records after 5 minutes
 
-// POST /api/kb/split-pdf/{referenceId} - Split PDF into individual page images
+// POST /api/kb/split-pdf/{referenceId} - Split PDF into individual single-page PDFs
 app.http('KBSplitPDF', {
     methods: ['POST'],
     authLevel: 'anonymous',
@@ -66,19 +21,6 @@ app.http('KBSplitPDF', {
         context.log(`[KB Split PDF] Starting for reference: ${referenceId}`);
         
         try {
-            // 0. Load PDF libraries (lazy load to prevent startup crash)
-            const libsLoaded = await loadPdfLibs();
-            if (!libsLoaded) {
-                return {
-                    status: 500,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        error: 'PDF splitting is unavailable',
-                        details: pdfLibsError || 'Failed to load PDF libraries'
-                    })
-                };
-            }
-            
             // 1. Fetch the reference from CosmosDB
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
@@ -135,10 +77,10 @@ app.http('KBSplitPDF', {
                 };
             }
             
-            // 4. Open PDF with pdf.js and get page count
-            context.log('[KB Split PDF] Opening PDF with pdf.js...');
-            const pdfDoc = await pdfjsLib.getDocument({ data: pdfBuffer }).promise;
-            const totalPages = pdfDoc.numPages;
+            // 4. Load PDF with pdf-lib and get page count
+            context.log('[KB Split PDF] Loading PDF with pdf-lib...');
+            const pdfDoc = await PDFDocument.load(pdfBuffer);
+            const totalPages = pdfDoc.getPageCount();
             
             context.log(`[KB Split PDF] PDF has ${totalPages} pages`);
             
@@ -168,50 +110,30 @@ app.http('KBSplitPDF', {
             };
             
             const processedPages = [];
-            const canvasFactory = new NodeCanvasFactory();
             
-            // 6. Loop through each page
+            // 6. Split each page into a separate PDF and upload
             for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
                 context.log(`[KB Split PDF] Processing page ${pageNum}/${totalPages}`);
                 
                 try {
-                    // Get the page (1-indexed in pdf.js)
-                    const page = await pdfDoc.getPage(pageNum);
-                    
-                    // Get viewport at 300 DPI (default is 72 DPI, so scale = 300/72 ≈ 4.17)
-                    const scale = 300 / 72;
-                    const viewport = page.getViewport({ scale });
-                    
-                    // Create canvas for rendering
-                    const canvasAndContext = canvasFactory.create(
-                        Math.floor(viewport.width),
-                        Math.floor(viewport.height)
-                    );
-                    
-                    // Render page to canvas
-                    await page.render({
-                        canvasContext: canvasAndContext.context,
-                        viewport: viewport,
-                        canvasFactory: canvasFactory
-                    }).promise;
-                    
-                    // Convert canvas to JPEG buffer
-                    const jpegBuffer = canvasAndContext.canvas.toBuffer('image/jpeg', { quality: 0.9 });
-                    
-                    // Clean up canvas
-                    canvasFactory.destroy(canvasAndContext);
-                    
-                    // Generate blob name for this page
                     const paddedPageNum = String(pageNum).padStart(4, '0');
-                    const pageBlobName = `${referenceId}/page_${paddedPageNum}.jpg`;
+                    
+                    // Create a new PDF with just this page
+                    const singlePagePdf = await PDFDocument.create();
+                    const [copiedPage] = await singlePagePdf.copyPages(pdfDoc, [pageNum - 1]);
+                    singlePagePdf.addPage(copiedPage);
+                    
+                    // Save the single-page PDF to a buffer
+                    const pdfBytes = await singlePagePdf.save();
                     
                     // Upload to blob storage
+                    const pageBlobName = `${referenceId}/page_${paddedPageNum}.pdf`;
                     context.log(`[KB Split PDF] Uploading page ${pageNum} to blob: ${pageBlobName}`);
                     const blobUrl = await uploadBlob(
                         BLOB_CONTAINER_PAGES,
                         pageBlobName,
-                        jpegBuffer,
-                        'image/jpeg'
+                        Buffer.from(pdfBytes),
+                        'application/pdf'
                     );
                     
                     // Create CosmosDB record for this page
@@ -222,6 +144,7 @@ app.http('KBSplitPDF', {
                         totalPages: totalPages,
                         blobUrl: blobUrl,
                         blobName: pageBlobName,
+                        fileType: 'pdf',
                         metadata: metadata,
                         ocrStatus: 0, // Not yet OCR'd
                         dateCreated: new Date().toISOString()
@@ -247,7 +170,6 @@ app.http('KBSplitPDF', {
                     
                 } catch (pageError) {
                     context.error(`[KB Split PDF] Error processing page ${pageNum}:`, pageError.message);
-                    // Continue with other pages but log the error
                     processedPages.push({
                         pageNumber: pageNum,
                         error: pageError.message
