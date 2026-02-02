@@ -1,7 +1,12 @@
 const { app } = require('@azure/functions');
 const { downloadBlob, uploadBlob } = require('../../shared/blobClient');
 const { getItem, upsertItem, createItem } = require('../../shared/cosmosClient');
-const mupdf = require('mupdf');
+let mupdf = null;
+try {
+    mupdf = require('mupdf');
+} catch (e) {
+    mupdf = null;
+}
 
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
@@ -19,6 +24,17 @@ app.http('KBSplitPDF', {
         context.log(`[KB Split PDF] Starting for reference: ${referenceId}`);
         
         try {
+            if (!mupdf) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'PDF splitting is unavailable on this deployment target',
+                        details: 'MuPDF failed to load in the Functions runtime. This is commonly due to native module incompatibility in Azure.'
+                    })
+                };
+            }
+
             // 1. Fetch the reference from CosmosDB
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
