@@ -30,8 +30,10 @@ class NodeCanvasFactory {
 
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
+const CONTAINER_JOBS = process.env.COSMOSDB_CONTAINER_JOBS || 'jobs';
 const BLOB_CONTAINER_UPLOADS = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
 const BLOB_CONTAINER_PAGES = process.env.BLOB_CONTAINER_PAGES || 'pages';
+const JOB_TTL_SECONDS = 300; // Auto-delete job records after 5 minutes
 
 // POST /api/kb/split-pdf/{referenceId} - Split PDF into individual page images
 app.http('KBSplitPDF', {
@@ -106,6 +108,22 @@ app.http('KBSplitPDF', {
             const totalPages = pdfDoc.numPages;
             
             context.log(`[KB Split PDF] PDF has ${totalPages} pages`);
+            
+            // 4.5 Create job status record for progress tracking
+            const jobId = `job_${referenceId}_${Date.now()}`;
+            const jobRecord = {
+                id: jobId,
+                referenceId: referenceId,
+                type: 'split-pdf',
+                status: 'processing',
+                totalPages: totalPages,
+                pagesCompleted: 0,
+                currentPage: 0,
+                startedAt: new Date().toISOString(),
+                ttl: JOB_TTL_SECONDS
+            };
+            await createItem(CONTAINER_JOBS, jobRecord);
+            context.log(`[KB Split PDF] Created job record: ${jobId}`);
             
             // 5. Extract metadata from reference for page records
             const metadata = {
@@ -186,6 +204,14 @@ app.http('KBSplitPDF', {
                     
                     context.log(`[KB Split PDF] Page ${pageNum} completed`);
                     
+                    // Update job progress
+                    await upsertItem(CONTAINER_JOBS, {
+                        ...jobRecord,
+                        pagesCompleted: pageNum,
+                        currentPage: pageNum,
+                        lastUpdated: new Date().toISOString()
+                    });
+                    
                 } catch (pageError) {
                     context.error(`[KB Split PDF] Error processing page ${pageNum}:`, pageError.message);
                     // Continue with other pages but log the error
@@ -209,11 +235,21 @@ app.http('KBSplitPDF', {
             
             context.log(`[KB Split PDF] Completed! ${processedPages.length} pages processed`);
             
+            // Mark job as complete
+            await upsertItem(CONTAINER_JOBS, {
+                ...jobRecord,
+                status: 'complete',
+                pagesCompleted: totalPages,
+                completedAt: new Date().toISOString(),
+                ttl: JOB_TTL_SECONDS
+            });
+            
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     success: true,
+                    jobId: jobId,
                     referenceId: referenceId,
                     totalPages: totalPages,
                     processedPages: processedPages.length,
@@ -228,6 +264,51 @@ app.http('KBSplitPDF', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to split PDF', details: error.message })
+            };
+        }
+    }
+});
+
+// GET /api/kb/job-status/{jobId} - Get job progress status
+app.http('KBJobStatus', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'kb/job-status/{jobId}',
+    handler: async (request, context) => {
+        const jobId = request.params.jobId;
+        
+        try {
+            const job = await getItem(CONTAINER_JOBS, jobId, jobId);
+            
+            if (!job) {
+                return {
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Job not found' })
+                };
+            }
+            
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jobId: job.id,
+                    referenceId: job.referenceId,
+                    status: job.status,
+                    totalPages: job.totalPages,
+                    pagesCompleted: job.pagesCompleted,
+                    currentPage: job.currentPage,
+                    progress: job.totalPages > 0 ? Math.round((job.pagesCompleted / job.totalPages) * 100) : 0,
+                    startedAt: job.startedAt,
+                    completedAt: job.completedAt
+                })
+            };
+        } catch (error) {
+            context.error('[KB Job Status] Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to get job status', details: error.message })
             };
         }
     }
