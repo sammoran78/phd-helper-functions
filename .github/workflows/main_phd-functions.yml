@@ -9,7 +9,7 @@ on:
 env:
   AZURE_FUNCTIONAPP_NAME: 'phd-helper-functions-hwgefgecf9gjced3'
   AZURE_RESOURCE_GROUP: 'phdhelper-AUeast'
-  NODE_VERSION: '20.x'
+  NODE_VERSION: '22.x'
 
 jobs:
   build-and-deploy:
