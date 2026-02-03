@@ -302,8 +302,16 @@ function extractOcrText(payload) {
         return payload.trim() || null;
     }
 
+    if (typeof payload.full_text === 'string') {
+        return payload.full_text.trim() || null;
+    }
+
     if (typeof payload.text === 'string') {
         return payload.text.trim() || null;
+    }
+
+    if (typeof payload.ocr_text === 'string') {
+        return payload.ocr_text.trim() || null;
     }
 
     if (typeof payload.result === 'string') {
