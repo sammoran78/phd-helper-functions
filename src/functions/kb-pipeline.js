@@ -296,45 +296,35 @@ function validateOcrUrl(ocrUrl) {
 }
 
 function extractOcrText(payload) {
-    if (!payload) return null;
+    if (!payload) return { text: null, printPage: null };
+
+    let text = null;
+    let printPage = null;
 
     if (typeof payload === 'string') {
-        return payload.trim() || null;
-    }
-
-    if (typeof payload.full_text === 'string') {
-        return payload.full_text.trim() || null;
-    }
-
-    if (typeof payload.text === 'string') {
-        return payload.text.trim() || null;
-    }
-
-    if (typeof payload.ocr_text === 'string') {
-        return payload.ocr_text.trim() || null;
-    }
-
-    if (typeof payload.result === 'string') {
-        return payload.result.trim() || null;
-    }
-
-    if (payload.result && typeof payload.result.text === 'string') {
-        return payload.result.text.trim() || null;
-    }
-
-    if (Array.isArray(payload.pages) && payload.pages.length > 0) {
+        text = payload.trim() || null;
+    } else if (typeof payload.full_text === 'string') {
+        text = payload.full_text.trim() || null;
+        printPage = payload.print_published_page || null;
+    } else if (typeof payload.text === 'string') {
+        text = payload.text.trim() || null;
+    } else if (typeof payload.ocr_text === 'string') {
+        text = payload.ocr_text.trim() || null;
+    } else if (typeof payload.result === 'string') {
+        text = payload.result.trim() || null;
+    } else if (payload.result && typeof payload.result.text === 'string') {
+        text = payload.result.text.trim() || null;
+    } else if (Array.isArray(payload.pages) && payload.pages.length > 0) {
         const pageTexts = payload.pages
             .map(p => (typeof p?.text === 'string' ? p.text.trim() : ''))
             .filter(Boolean);
-        if (pageTexts.length > 0) return pageTexts.join('\n\n');
-    }
-
-    if (Array.isArray(payload.choices) && payload.choices.length > 0) {
+        if (pageTexts.length > 0) text = pageTexts.join('\n\n');
+    } else if (Array.isArray(payload.choices) && payload.choices.length > 0) {
         const content = payload.choices?.[0]?.message?.content;
-        if (typeof content === 'string') return content.trim() || null;
+        if (typeof content === 'string') text = content.trim() || null;
     }
 
-    return null;
+    return { text, printPage };
 }
 
 async function postPdfToOcr(ocrUrl, pdfBuffer, context) {
@@ -552,7 +542,8 @@ app.http('KBOCRPages', {
                             ocrCompletedAt: new Date().toISOString()
                         });
                     } else {
-                        const extracted = extractOcrText(ocrRes.payload) || (typeof ocrRes.rawText === 'string' ? ocrRes.rawText.trim() : null);
+                        const ocrResult = extractOcrText(ocrRes.payload);
+                        const extracted = ocrResult.text || (typeof ocrRes.rawText === 'string' ? ocrRes.rawText.trim() : null);
 
                         if (!extracted) {
                             pagesFailed += 1;
@@ -570,6 +561,7 @@ app.http('KBOCRPages', {
                                 ocrStatus: 1,
                                 ocrError: null,
                                 ocrText: extracted,
+                                printPublishedPage: ocrResult.printPage || null,
                                 ocrCompletedAt: new Date().toISOString()
                             });
                         }
