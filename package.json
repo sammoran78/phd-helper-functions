@@ -11,6 +11,7 @@
     "@azure/cosmos": "^4.0.0",
     "@azure/functions": "^4.0.0",
     "@azure/storage-blob": "^12.17.0",
+    "docx": "^9.5.1",
     "googleapis": "^126.0.0",
     "mammoth": "^1.6.0",
     "openai": "^4.20.1",

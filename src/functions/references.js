@@ -1,5 +1,6 @@
 const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
+const { Document, Packer, Paragraph, TextRun } = require('docx');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
@@ -190,6 +191,128 @@ app.http('GetBibliography', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to load bibliography', details: error.message })
+            };
+        }
+    }
+});
+
+function parseSimpleMarkdownRuns(text) {
+    const s = (text || '').toString();
+    const runs = [];
+    let i = 0;
+
+    const pushRun = (value, opts) => {
+        if (!value) return;
+        runs.push(new TextRun({
+            text: value,
+            font: 'Times New Roman',
+            size: 22,
+            ...opts
+        }));
+    };
+
+    while (i < s.length) {
+        const isBold = s.startsWith('**', i);
+        const isItalic = s.startsWith('*', i);
+
+        if (isBold) {
+            const end = s.indexOf('**', i + 2);
+            if (end !== -1) {
+                pushRun(s.slice(i + 2, end), { bold: true });
+                i = end + 2;
+                continue;
+            }
+        }
+
+        if (isItalic) {
+            const end = s.indexOf('*', i + 1);
+            if (end !== -1) {
+                pushRun(s.slice(i + 1, end), { italics: true });
+                i = end + 1;
+                continue;
+            }
+        }
+
+        const nextBold = s.indexOf('**', i);
+        const nextItalic = s.indexOf('*', i);
+        let next = -1;
+        if (nextBold !== -1 && nextItalic !== -1) next = Math.min(nextBold, nextItalic);
+        else next = nextBold !== -1 ? nextBold : nextItalic;
+
+        if (next === -1) {
+            pushRun(s.slice(i), {});
+            break;
+        }
+
+        pushRun(s.slice(i, next), {});
+        i = next;
+    }
+
+    return runs;
+}
+
+// GET /api/references/bibliography/export-docx - Export bibliography list as DOCX
+app.http('ExportBibliographyDocx', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'references/bibliography/export-docx',
+    handler: async (request, context) => {
+        try {
+            context.log('Exporting bibliography to DOCX');
+
+            const references = await queryItems(CONTAINER_NAME, {
+                query: 'SELECT * FROM c WHERE c.ref_knowledge_status = 4 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+            });
+
+            const sorted = references.sort((a, b) => {
+                const authorsA = (a.authors || a.author || '').toLowerCase();
+                const authorsB = (b.authors || b.author || '').toLowerCase();
+                return authorsA.localeCompare(authorsB);
+            });
+
+            const paragraphs = sorted.map(ref => {
+                const apa7 = (ref.apa7 || '').toString().trim();
+                const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
+                const text = apa7 || fallback;
+
+                return new Paragraph({
+                    children: parseSimpleMarkdownRuns(text),
+                    indent: { left: 720, hanging: 720 },
+                    spacing: { after: 240 }
+                });
+            });
+
+            const doc = new Document({
+                sections: [
+                    {
+                        properties: {},
+                        children: paragraphs.length > 0 ? paragraphs : [
+                            new Paragraph({
+                                children: [new TextRun({ text: 'No bibliography entries.', font: 'Times New Roman', size: 22 })]
+                            })
+                        ]
+                    }
+                ]
+            });
+
+            const buffer = await Packer.toBuffer(doc);
+            const fileName = `bibliography_${new Date().toISOString().slice(0, 10)}.docx`;
+
+            return {
+                status: 200,
+                isRaw: true,
+                headers: {
+                    'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'Content-Disposition': `attachment; filename="${fileName}"`
+                },
+                body: buffer
+            };
+        } catch (error) {
+            context.error('Export Bibliography DOCX Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to export bibliography', details: error.message })
             };
         }
     }
