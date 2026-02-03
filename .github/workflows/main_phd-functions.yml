@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_NAME: 'phd-helper-functions-hwgefgecf9gjced3'
+  AZURE_FUNCTIONAPP_NAME: 'phd-function-app-dwbbgeeza3fyhuej'
   AZURE_RESOURCE_GROUP: 'phdhelper-AUeast'
   NODE_VERSION: '22.x'
 
@@ -39,6 +39,13 @@ jobs:
           PASSWORD=$(echo "$PUBLISH_PROFILE" | grep -oP 'userPWD="\K[^"]+' | head -1)
           PUBLISH_URL=$(echo "$PUBLISH_PROFILE" | grep -oP 'publishUrl="\K[^"]+' | head -1)
           PUBLISH_HOST=${PUBLISH_URL%%:*}
+
+          if [[ "$PUBLISH_HOST" != *"${AZURE_FUNCTIONAPP_NAME}"* ]]; then
+            echo "Publish profile host ($PUBLISH_HOST) does not appear to match AZURE_FUNCTIONAPP_NAME (${AZURE_FUNCTIONAPP_NAME})."
+            echo "Update the GitHub secret AZURE_FUNCTIONAPP_PUBLISH_PROFILE to the publish profile for ${AZURE_FUNCTIONAPP_NAME}."
+            exit 1
+          fi
+
           export USERNAME
           export PASSWORD
           export PUBLISH_HOST
