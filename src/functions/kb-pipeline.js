@@ -531,7 +531,10 @@ app.http('KBOCRPages', {
                 const processingRecord = {
                     ...page,
                     ocrStatus: 2,
-                    ocrStartedAt: new Date().toISOString()
+                    ocrStartedAt: new Date().toISOString(),
+                    ocrCompletedAt: null,
+                    ocrError: null,
+                    ocrText: null
                 };
                 await upsertItem(CONTAINER_PAGES, processingRecord);
 
@@ -545,6 +548,7 @@ app.http('KBOCRPages', {
                             ...processingRecord,
                             ocrStatus: -1,
                             ocrError: ocrRes.error || 'OCR request failed',
+                            ocrText: null,
                             ocrCompletedAt: new Date().toISOString()
                         });
                     } else {
@@ -556,6 +560,7 @@ app.http('KBOCRPages', {
                                 ...processingRecord,
                                 ocrStatus: -1,
                                 ocrError: 'OCR response did not include extractable text',
+                                ocrText: null,
                                 ocrCompletedAt: new Date().toISOString()
                             });
                         } else {
@@ -563,6 +568,7 @@ app.http('KBOCRPages', {
                             await upsertItem(CONTAINER_PAGES, {
                                 ...processingRecord,
                                 ocrStatus: 1,
+                                ocrError: null,
                                 ocrText: extracted,
                                 ocrCompletedAt: new Date().toISOString()
                             });
