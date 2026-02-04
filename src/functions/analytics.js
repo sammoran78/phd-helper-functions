@@ -10,6 +10,7 @@ const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const LANDSCAPE_DOC_ID = 'analytics_landscape';
 const LANDSCAPE_TTL_MS = 24 * 60 * 60 * 1000;
+const COFFEE_COUNTER_DOC_ID = 'coffee_counter';
 
 const isLandscapeStale = (dateGenerated) => {
     if (!dateGenerated) return true;
@@ -47,6 +48,98 @@ const buildLandscapeSnapshot = async (context) => {
     context?.log(`Saved analytics landscape snapshot with ${references.length} references`);
     return snapshot;
 };
+
+const toCounterNumber = (value) => {
+    const n = typeof value === 'number' ? value : parseInt(value, 10);
+    if (!Number.isFinite(n) || Number.isNaN(n)) return 0;
+    return Math.max(0, Math.floor(n));
+};
+
+const getOrCreateCoffeeCounter = async (context) => {
+    let existing = await getItem(CONTAINER_NAME, COFFEE_COUNTER_DOC_ID, COFFEE_COUNTER_DOC_ID);
+    if (!existing) {
+        existing = {
+            id: COFFEE_COUNTER_DOC_ID,
+            type: 'coffee_counter',
+            count: 0,
+            updatedAt: new Date().toISOString(),
+            createdAt: new Date().toISOString()
+        };
+        existing = await upsertItem(CONTAINER_NAME, existing);
+        context?.log('Created coffee counter document');
+    }
+    return existing;
+};
+
+// GET /api/analytics/coffee-counter - Get current coffee counter
+app.http('GetCoffeeCounter', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'analytics/coffee-counter',
+    handler: async (request, context) => {
+        try {
+            const counter = await getOrCreateCoffeeCounter(context);
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: COFFEE_COUNTER_DOC_ID,
+                    type: 'coffee_counter',
+                    count: toCounterNumber(counter.count),
+                    updatedAt: counter.updatedAt,
+                    createdAt: counter.createdAt
+                })
+            };
+        } catch (error) {
+            context.error('Get Coffee Counter Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to retrieve coffee counter', details: error.message })
+            };
+        }
+    }
+});
+
+// POST /api/analytics/coffee-counter/increment - Increment coffee counter by 1
+app.http('IncrementCoffeeCounter', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'analytics/coffee-counter/increment',
+    handler: async (request, context) => {
+        try {
+            const counter = await getOrCreateCoffeeCounter(context);
+            const nextCount = toCounterNumber(counter.count) + 1;
+            const updated = await upsertItem(CONTAINER_NAME, {
+                ...counter,
+                id: COFFEE_COUNTER_DOC_ID,
+                type: 'coffee_counter',
+                count: nextCount,
+                updatedAt: new Date().toISOString(),
+                createdAt: counter.createdAt || new Date().toISOString()
+            });
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: COFFEE_COUNTER_DOC_ID,
+                    type: 'coffee_counter',
+                    count: toCounterNumber(updated.count),
+                    updatedAt: updated.updatedAt,
+                    createdAt: updated.createdAt
+                })
+            };
+        } catch (error) {
+            context.error('Increment Coffee Counter Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to increment coffee counter', details: error.message })
+            };
+        }
+    }
+});
 
 // GET /api/analytics/landscape - Get cached landscape snapshot (refresh daily or manually)
 app.http('GetAnalyticsLandscape', {
