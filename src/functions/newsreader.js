@@ -455,17 +455,32 @@ app.http('GetNewsreaderArticles', {
                 ...shortlist.map(s => s.title ? s.title.toLowerCase().trim() : '')
             ].map(normalizeValue).filter(Boolean));
             
-            // Relevance keywords
-            const RELEVANCE_KEYWORDS = [
+            const AI_RELEVANCE_KEYWORDS = [
                 'artificial intelligence', 'AI', 'machine learning', 'generative', 'neural network',
                 'deep learning', 'GPT', 'LLM', 'language model', 'diffusion', 'DALL-E', 'Midjourney',
-                'ChatGPT', 'creative', 'creativity', 'art', 'artist', 'design', 'designer',
-                'music', 'writing', 'author', 'copyright', 'intellectual property', 'automation',
-                'labor', 'labour', 'work', 'worker', 'employment', 'job', 'platform', 'gig economy',
-                'human-computer', 'HCI', 'interaction', 'co-creation', 'collaboration',
-                'media', 'journalism', 'content', 'algorithm', 'computational', 'authorship',
-                'creative industries', 'cultural industries', 'precarity', 'deskilling'
+                'ChatGPT', 'automation', 'algorithmic',
+                'generative ai', 'genai', 'gen-ai'
             ];
+
+            const THESIS_SCOPE_KEYWORDS = [
+                'creative labor', 'creative labour', 'labor', 'labour', 'work', 'worker', 'employment',
+                'creative industries', 'cultural industries', 'cultural production',
+                'arts', 'creative arts', 'art', 'artist', 'artists',
+                'media', 'communication', 'journalism', 'content',
+                'design', 'designer', 'music', 'writing', 'author', 'authors', 'authorship',
+                'copyright', 'intellectual property', 'licensing', 'attribution',
+                'platform', 'gig economy', 'creator economy',
+                'co-creation', 'collaboration', 'agency', 'precarity', 'deskilling'
+            ];
+
+            const THESIS_SCOPE_TOKEN_SET = new Set(tokenizeText(THESIS_SCOPE_KEYWORDS.join(' ')));
+            const isThesisScopedTerm = (term = '') => {
+                const tokens = tokenizeText(term);
+                return tokens.some(t => THESIS_SCOPE_TOKEN_SET.has(t));
+            };
+
+            const REQUIRED_QUERY_ANCHOR = 'creative labor creative industries arts media communication';
+            const anchorQuery = (query = '') => `${query} ${REQUIRED_QUERY_ANCHOR}`.replace(/\s+/g, ' ').trim();
             
             // Search queries
             const baseSearchQueries = [
@@ -532,7 +547,7 @@ app.http('GetNewsreaderArticles', {
                 const domainSuffix = domainTokens.length > 0 ? domainTokens.join(' ') : '';
 
                 baseQueries.forEach(q => {
-                    const combined = `${q} ${domainSuffix} ${bestSubject}`.replace(/\s+/g, ' ').trim();
+                    const combined = anchorQuery(`${q} ${domainSuffix} ${bestSubject}`.replace(/\s+/g, ' ').trim());
                     if (!combined) return;
                     gapQueries.push({
                         query: combined,
@@ -542,31 +557,45 @@ app.http('GetNewsreaderArticles', {
             });
 
             // Generate subject/topic queries from your existing corpus topics
-            const subjectQueries = analyticsSubjects.slice(0, 6)
+            const subjectQueries = analyticsSubjects
                 .filter(term => term && term.length > 3)
+                .filter(term => isThesisScopedTerm(term))
+                .slice(0, 6)
                 .map(term => ({
-                    query: `"${term}" generative AI creativity creative industries`,
+                    query: anchorQuery(`"${term}" generative AI creativity creative industries`),
                     category: `Topic: ${term}`
                 }));
 
             // Generate domain queries from connected research areas
-            const domainQueries = analyticsDomains.slice(0, 5)
+            const domainQueries = analyticsDomains
+                .filter(domain => domain && domain.length > 2)
+                .filter(domain => isThesisScopedTerm(domain))
+                .slice(0, 5)
                 .map(domain => ({
-                    query: `${domain} generative AI creative labor`,
+                    query: anchorQuery(`${domain} generative AI creative labor`),
                     category: `Domain: ${domain}`
                 }));
 
             // Combine queries, prioritizing gaps
-            const searchQueries = [...gapQueries, ...subjectQueries, ...domainQueries, ...baseSearchQueries];
+            const searchQueries = [
+                ...gapQueries,
+                ...subjectQueries,
+                ...domainQueries,
+                ...baseSearchQueries.map(q => ({ ...q, query: anchorQuery(q.query) }))
+            ];
             
             const isRelevantArticle = (title, abstract) => {
                 const text = `${title || ''} ${abstract || ''}`.toLowerCase();
-                const hasRelevantKeyword = RELEVANCE_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
-                if (!hasRelevantKeyword) return false;
+                const hasAiKeyword = AI_RELEVANCE_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
+                if (!hasAiKeyword) return false;
+
+                const hasScopeKeyword = THESIS_SCOPE_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
+                if (!hasScopeKeyword) return false;
                 
                 const offTopicPatterns = [
                     /\bhealthcare\b/i, /\bmedical\b/i, /\bclinical\b/i, /\bpatient\b/i,
                     /\bbiological\b/i, /\bchemistry\b/i, /\bphysics\b/i, /\bgeology\b/i,
+                    /\bquantum\b/i, /\bcosmology\b/i, /\bastronomy\b/i, /\bsatellite\b/i, /\blunar\b/i,
                     /\bagriculture\b/i, /\bfarming\b/i, /\bcrop\b/i,
                     /\bsports\b/i, /\bathletic\b/i,
                     /\bfinancial\b/i, /\bbanking\b/i, /\bstock\b/i,
