@@ -23,6 +23,14 @@ function toClientItem(item) {
     };
 }
 
+function toShortString(value, maxLen = 280) {
+    if (value === undefined || value === null) return null;
+    const s = String(value).trim();
+    if (!s) return null;
+    if (s.length <= maxLen) return s;
+    return s.slice(0, maxLen);
+}
+
 // GET /api/projects - Load all project planner data
 app.http('GetProjects', {
     methods: ['GET'],
@@ -79,6 +87,7 @@ app.http('UpsertProjectTask', {
                 ...body,
                 id,
                 type: 'task',
+                description: toShortString(body.description, 280),
                 updatedAt: new Date().toISOString(),
                 createdAt: body.createdAt || new Date().toISOString()
             };
