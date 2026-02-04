@@ -23,6 +23,24 @@ const tokenizeText = (text = '') => text
     .split(/\s+/)
     .filter(token => token.length > 3 && !STOPWORDS.has(token));
 
+const pickBestSubject = (gapTokens, subjectTerms) => {
+    if (!gapTokens || gapTokens.length === 0) return subjectTerms[0] || '';
+    let best = subjectTerms[0] || '';
+    let bestScore = 0;
+    subjectTerms.forEach(term => {
+        const tokens = tokenizeText(term);
+        let score = 0;
+        tokens.forEach(token => {
+            if (gapTokens.includes(token)) score += 1;
+        });
+        if (score > bestScore) {
+            bestScore = score;
+            best = term;
+        }
+    });
+    return best;
+};
+
 const decodeIdentifier = (value = '') => {
     try {
         return decodeURIComponent(value);
@@ -470,12 +488,32 @@ app.http('GetNewsreaderArticles', {
 
             // Fetch latest analytics to get research gaps
             let analyticsGaps = [];
+            let analyticsSubjects = [];
+            let analyticsDomains = [];
             try {
-                const query = 'SELECT * FROM c ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1';
-                const analyticsResults = await queryItems(SHORTLIST_CONTAINER, { query });
-                if (analyticsResults.length > 0 && analyticsResults[0].gaps) {
-                    analyticsGaps = analyticsResults[0].gaps;
-                    context.log(`[Newsreader] Found ${analyticsGaps.length} research gaps from analytics`);
+                const querySpec = {
+                    query: 'SELECT * FROM c WHERE c.type = "corpus_analysis" ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1'
+                };
+                const analyticsResults = await queryItems(SHORTLIST_CONTAINER, querySpec);
+                const latest = analyticsResults[0];
+                if (latest) {
+                    analyticsGaps = Array.isArray(latest.gaps) ? latest.gaps : [];
+                    analyticsSubjects = Array.isArray(latest.subjects)
+                        ? latest.subjects.map(s => s?.name).filter(Boolean)
+                        : [];
+
+                    const domainNames = new Set();
+                    analyticsGaps.forEach(gap => {
+                        const domains = gap?.connectedDomains || gap?.suggestedDomains || [];
+                        if (Array.isArray(domains)) {
+                            domains.forEach(d => {
+                                if (d) domainNames.add(d);
+                            });
+                        }
+                    });
+                    analyticsDomains = Array.from(domainNames);
+
+                    context.log(`[Newsreader] Loaded analytics: ${analyticsGaps.length} gaps, ${analyticsSubjects.length} subjects`);
                 }
             } catch (e) {
                 context.warn('[Newsreader] Failed to load analytics gaps:', e.message);
@@ -484,18 +522,42 @@ app.http('GetNewsreaderArticles', {
             // Generate gap-based queries
             const gapQueries = [];
             analyticsGaps.forEach(gap => {
-                if (gap.searchQueries && Array.isArray(gap.searchQueries)) {
-                    gap.searchQueries.forEach(q => {
-                        gapQueries.push({
-                            query: q,
-                            category: `Gap: ${gap.name}`
-                        });
+                const baseQueries = Array.isArray(gap?.searchQueries) && gap.searchQueries.length > 0
+                    ? gap.searchQueries.slice(0, 2)
+                    : [`${gap?.name || ''} ${gap?.description || ''}`.trim()];
+
+                const gapTokens = tokenizeText(`${gap?.name || ''} ${gap?.description || ''}`);
+                const bestSubject = pickBestSubject(gapTokens, analyticsSubjects.slice(0, 10));
+                const domainTokens = tokenizeText((gap?.connectedDomains || gap?.suggestedDomains || []).join(' ')).slice(0, 4);
+                const domainSuffix = domainTokens.length > 0 ? domainTokens.join(' ') : '';
+
+                baseQueries.forEach(q => {
+                    const combined = `${q} ${domainSuffix} ${bestSubject}`.replace(/\s+/g, ' ').trim();
+                    if (!combined) return;
+                    gapQueries.push({
+                        query: combined,
+                        category: `Gap: ${gap?.name || 'Research Gap'}`
                     });
-                }
+                });
             });
 
+            // Generate subject/topic queries from your existing corpus topics
+            const subjectQueries = analyticsSubjects.slice(0, 6)
+                .filter(term => term && term.length > 3)
+                .map(term => ({
+                    query: `"${term}" generative AI creativity creative industries`,
+                    category: `Topic: ${term}`
+                }));
+
+            // Generate domain queries from connected research areas
+            const domainQueries = analyticsDomains.slice(0, 5)
+                .map(domain => ({
+                    query: `${domain} generative AI creative labor`,
+                    category: `Domain: ${domain}`
+                }));
+
             // Combine queries, prioritizing gaps
-            const searchQueries = [...gapQueries, ...baseSearchQueries];
+            const searchQueries = [...gapQueries, ...subjectQueries, ...domainQueries, ...baseSearchQueries];
             
             const isRelevantArticle = (title, abstract) => {
                 const text = `${title || ''} ${abstract || ''}`.toLowerCase();

@@ -89,8 +89,10 @@ app.http('GetAnalytics', {
     handler: async (request, context) => {
         try {
             // Query for the most recent analytics record
-            const query = 'SELECT * FROM c ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1';
-            const results = await queryItems(CONTAINER_NAME, query);
+            const querySpec = {
+                query: 'SELECT * FROM c WHERE c.type = "corpus_analysis" ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1'
+            };
+            const results = await queryItems(CONTAINER_NAME, querySpec);
             
             if (results.length === 0) {
                 return {
@@ -319,6 +321,7 @@ app.http('AnalyzeCorpus', {
             
             const analysis = {
                 id: `analytics_${Date.now()}`,
+                type: 'corpus_analysis',
                 dateGenerated: new Date().toISOString(),
                 timestamp: new Date().toISOString(),
                 referenceCount: references.length,
@@ -363,8 +366,10 @@ app.http('GetAnalyticsHistory', {
             const url = new URL(request.url);
             const limit = parseInt(url.searchParams.get('limit') || '10');
             
-            const query = `SELECT * FROM c ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT ${limit}`;
-            const results = await queryItems(CONTAINER_NAME, query);
+            const querySpec = {
+                query: `SELECT * FROM c WHERE c.type = "corpus_analysis" ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT ${limit}`
+            };
+            const results = await queryItems(CONTAINER_NAME, querySpec);
             
             context.log(`Retrieved ${results.length} analytics records`);
             
