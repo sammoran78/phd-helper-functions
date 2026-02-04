@@ -384,4 +384,283 @@ app.http('GetAnalyticsHistory', {
     }
 });
 
+// Dashboard snapshot document ID
+const DASHBOARD_SNAPSHOT_ID = 'dashboard_snapshot';
+
+// GET /api/analytics/dashboard - Get dashboard stats with weekly change
+app.http('GetDashboardAnalytics', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'analytics/dashboard',
+    handler: async (request, context) => {
+        try {
+            // Get the dashboard snapshot document
+            let snapshot = await getItem(CONTAINER_NAME, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID);
+            
+            if (!snapshot) {
+                // Return default values if no snapshot exists
+                return {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        sourcesParsed: { current: 0, weekChange: 0 },
+                        wordCount: { current: 0, weekChange: 0, target: 80000 },
+                        daysToMilestone: { current: 0, milestoneName: 'No milestone set' },
+                        surveyResponses: { current: 0, weekChange: 0 },
+                        lastUpdated: null,
+                        needsRefresh: true
+                    })
+                };
+            }
+            
+            // Calculate if data is stale (older than 24 hours)
+            const lastUpdated = snapshot.lastUpdated ? new Date(snapshot.lastUpdated) : null;
+            const isStale = !lastUpdated || (Date.now() - lastUpdated.getTime() > 24 * 60 * 60 * 1000);
+            
+            // Calculate weekly changes from history
+            const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+            const history = snapshot.history || [];
+            
+            const weekAgoEntry = history.find(h => new Date(h.timestamp).getTime() <= oneWeekAgo) || history[history.length - 1];
+            
+            const response = {
+                sourcesParsed: {
+                    current: snapshot.sourcesParsed || 0,
+                    weekChange: weekAgoEntry ? (snapshot.sourcesParsed || 0) - (weekAgoEntry.sourcesParsed || 0) : 0
+                },
+                wordCount: {
+                    current: snapshot.wordCount || 0,
+                    weekChange: weekAgoEntry ? (snapshot.wordCount || 0) - (weekAgoEntry.wordCount || 0) : 0,
+                    target: snapshot.wordCountTarget || 80000
+                },
+                daysToMilestone: {
+                    current: snapshot.daysToMilestone || 0,
+                    milestoneName: snapshot.milestoneName || 'Confirmation of Candidature'
+                },
+                surveyResponses: {
+                    current: snapshot.surveyResponses || 0,
+                    weekChange: weekAgoEntry ? (snapshot.surveyResponses || 0) - (weekAgoEntry.surveyResponses || 0) : 0
+                },
+                lastUpdated: snapshot.lastUpdated,
+                needsRefresh: isStale
+            };
+            
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(response)
+            };
+        } catch (error) {
+            context.error('Get Dashboard Analytics Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to retrieve dashboard analytics', details: error.message })
+            };
+        }
+    }
+});
+
+// POST /api/analytics/dashboard - Update dashboard stats (appends to history)
+app.http('UpdateDashboardAnalytics', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'analytics/dashboard',
+    handler: async (request, context) => {
+        try {
+            const body = await request.json();
+            const { sourcesParsed, wordCount, daysToMilestone, milestoneName, surveyResponses, wordCountTarget } = body;
+            
+            // Get existing snapshot or create new
+            let snapshot = await getItem(CONTAINER_NAME, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID);
+            
+            if (!snapshot) {
+                snapshot = {
+                    id: DASHBOARD_SNAPSHOT_ID,
+                    history: []
+                };
+            }
+            
+            // Add current values to history (keep last 90 days of history)
+            const now = new Date().toISOString();
+            const historyEntry = {
+                timestamp: now,
+                sourcesParsed: snapshot.sourcesParsed,
+                wordCount: snapshot.wordCount,
+                surveyResponses: snapshot.surveyResponses
+            };
+            
+            // Only add to history if values changed or it's been > 1 hour since last entry
+            const lastHistoryEntry = snapshot.history?.[0];
+            const shouldAddHistory = !lastHistoryEntry || 
+                (Date.now() - new Date(lastHistoryEntry.timestamp).getTime() > 60 * 60 * 1000) ||
+                lastHistoryEntry.sourcesParsed !== snapshot.sourcesParsed ||
+                lastHistoryEntry.wordCount !== snapshot.wordCount;
+            
+            if (shouldAddHistory && snapshot.sourcesParsed !== undefined) {
+                snapshot.history = [historyEntry, ...(snapshot.history || [])].slice(0, 90);
+            }
+            
+            // Update current values
+            if (sourcesParsed !== undefined) snapshot.sourcesParsed = sourcesParsed;
+            if (wordCount !== undefined) snapshot.wordCount = wordCount;
+            if (daysToMilestone !== undefined) snapshot.daysToMilestone = daysToMilestone;
+            if (milestoneName !== undefined) snapshot.milestoneName = milestoneName;
+            if (surveyResponses !== undefined) snapshot.surveyResponses = surveyResponses;
+            if (wordCountTarget !== undefined) snapshot.wordCountTarget = wordCountTarget;
+            
+            snapshot.lastUpdated = now;
+            
+            // Save to CosmosDB
+            await upsertItem(CONTAINER_NAME, snapshot);
+            
+            context.log('Dashboard analytics updated');
+            
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ success: true, lastUpdated: now })
+            };
+        } catch (error) {
+            context.error('Update Dashboard Analytics Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to update dashboard analytics', details: error.message })
+            };
+        }
+    }
+});
+
+// POST /api/analytics/dashboard/refresh - Auto-refresh dashboard stats from source data
+app.http('RefreshDashboardAnalytics', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'analytics/dashboard/refresh',
+    handler: async (request, context) => {
+        try {
+            // Fetch counts from various sources
+            
+            // 1. Count references (sources parsed)
+            const referencesQuery = 'SELECT VALUE COUNT(1) FROM c WHERE NOT IS_DEFINED(c.dismissed) OR c.dismissed != true';
+            const refCountResult = await queryItems(REFERENCES_CONTAINER, { query: referencesQuery });
+            const sourcesParsed = refCountResult[0] || 0;
+            
+            // 2. Get word count from Writing Analytics (look for "Working DRAFT" document)
+            let wordCount = 0;
+            try {
+                const writingQuery = 'SELECT * FROM c WHERE c.type = "writing_analytics" ORDER BY c._ts DESC OFFSET 0 LIMIT 1';
+                const writingResult = await queryItems(CONTAINER_NAME, { query: writingQuery });
+                if (writingResult.length > 0 && writingResult[0].documents) {
+                    const workingDraft = writingResult[0].documents.find(d => 
+                        d.title && d.title.toLowerCase().includes('working draft')
+                    );
+                    if (workingDraft) {
+                        wordCount = workingDraft.wordCount || 0;
+                    }
+                }
+            } catch (e) {
+                context.warn('Could not fetch word count:', e.message);
+            }
+            
+            // 3. Calculate days to milestone (from calendar/projects)
+            let daysToMilestone = 0;
+            let milestoneName = 'Confirmation of Candidature';
+            try {
+                const projectsQuery = 'SELECT * FROM c WHERE c.type = "project_config" OFFSET 0 LIMIT 1';
+                const projectResult = await queryItems(CONTAINER_NAME, { query: projectsQuery });
+                if (projectResult.length > 0 && projectResult[0].milestoneDate) {
+                    const milestoneDate = new Date(projectResult[0].milestoneDate);
+                    daysToMilestone = Math.max(0, Math.ceil((milestoneDate - Date.now()) / (1000 * 60 * 60 * 24)));
+                    milestoneName = projectResult[0].milestoneName || milestoneName;
+                }
+            } catch (e) {
+                context.warn('Could not fetch milestone:', e.message);
+            }
+            
+            // 4. Count survey responses
+            let surveyResponses = 0;
+            try {
+                const surveysContainer = process.env.COSMOSDB_CONTAINER_SURVEYS || 'surveys';
+                const surveyQuery = 'SELECT VALUE COUNT(1) FROM c';
+                const surveyResult = await queryItems(surveysContainer, { query: surveyQuery });
+                surveyResponses = surveyResult[0] || 0;
+            } catch (e) {
+                context.warn('Could not fetch survey count:', e.message);
+            }
+            
+            // Get existing snapshot
+            let snapshot = await getItem(CONTAINER_NAME, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID);
+            
+            if (!snapshot) {
+                snapshot = {
+                    id: DASHBOARD_SNAPSHOT_ID,
+                    history: []
+                };
+            }
+            
+            // Add to history before updating
+            const now = new Date().toISOString();
+            if (snapshot.sourcesParsed !== undefined) {
+                const historyEntry = {
+                    timestamp: now,
+                    sourcesParsed: snapshot.sourcesParsed,
+                    wordCount: snapshot.wordCount,
+                    surveyResponses: snapshot.surveyResponses
+                };
+                snapshot.history = [historyEntry, ...(snapshot.history || [])].slice(0, 90);
+            }
+            
+            // Update with fresh values
+            snapshot.sourcesParsed = sourcesParsed;
+            snapshot.wordCount = wordCount;
+            snapshot.daysToMilestone = daysToMilestone;
+            snapshot.milestoneName = milestoneName;
+            snapshot.surveyResponses = surveyResponses;
+            snapshot.lastUpdated = now;
+            
+            await upsertItem(CONTAINER_NAME, snapshot);
+            
+            context.log(`Dashboard refreshed: ${sourcesParsed} sources, ${wordCount} words, ${surveyResponses} surveys`);
+            
+            // Calculate weekly changes
+            const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+            const weekAgoEntry = snapshot.history.find(h => new Date(h.timestamp).getTime() <= oneWeekAgo) || snapshot.history[snapshot.history.length - 1];
+            
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sourcesParsed: {
+                        current: sourcesParsed,
+                        weekChange: weekAgoEntry ? sourcesParsed - (weekAgoEntry.sourcesParsed || 0) : 0
+                    },
+                    wordCount: {
+                        current: wordCount,
+                        weekChange: weekAgoEntry ? wordCount - (weekAgoEntry.wordCount || 0) : 0,
+                        target: snapshot.wordCountTarget || 80000
+                    },
+                    daysToMilestone: {
+                        current: daysToMilestone,
+                        milestoneName: milestoneName
+                    },
+                    surveyResponses: {
+                        current: surveyResponses,
+                        weekChange: weekAgoEntry ? surveyResponses - (weekAgoEntry.surveyResponses || 0) : 0
+                    },
+                    lastUpdated: now,
+                    needsRefresh: false
+                })
+            };
+        } catch (error) {
+            context.error('Refresh Dashboard Analytics Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to refresh dashboard analytics', details: error.message })
+            };
+        }
+    }
+});
+
 module.exports = { app };
