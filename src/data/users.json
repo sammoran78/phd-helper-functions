@@ -1,0 +1,14 @@
+[
+  {
+    "email": "sam.moran@mq.edu.au",
+    "password": "cinTih-tiskyz-xymtu8",
+    "name": "Sam Moran",
+    "role": "candidate"
+  },
+  {
+    "email": "jon.burtt@mq.edu.au",
+    "password": "supersecure",
+    "name": "Jon Burtt",
+    "role": "supervisor"
+  }
+]

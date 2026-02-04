@@ -13,6 +13,7 @@
     "BLOB_CONTAINER_UPLOADS": "uploads",
     "OPENAI_API_KEY": "",
     "OPENAI_MODEL": "gpt-4o-mini",
-    "OPENAI_REASONING_EFFORT": "low"
+    "OPENAI_REASONING_EFFORT": "low",
+    "AUTH_JWT_SECRET": "kbpE9syzxqg1vlD13oa2IgfOmVCef3EezdGzXTx3uhO"
   }
 }

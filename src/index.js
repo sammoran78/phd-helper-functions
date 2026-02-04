@@ -10,3 +10,4 @@ require('./functions/projects');
 require('./functions/ai');
 require('./functions/kb-pipeline');
 require('./functions/chats');
+require('./functions/auth');
