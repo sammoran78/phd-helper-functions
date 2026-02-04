@@ -10,6 +10,15 @@ const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY;
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
 
+const normalizeDoi = (value) => {
+    const s = normalizeValue(value);
+    if (!s) return '';
+    return s
+        .replace(/^https?:\/\/(dx\.)?doi\.org\//, '')
+        .replace(/^doi:\s*/i, '')
+        .trim();
+};
+
 const STOPWORDS = new Set([
     'about', 'above', 'after', 'again', 'against', 'between', 'beyond', 'could', 'should', 'would',
     'these', 'those', 'their', 'there', 'where', 'which', 'while', 'with', 'without', 'using',
@@ -50,7 +59,7 @@ const decodeIdentifier = (value = '') => {
 };
 
 const getArticleKeys = (article) => {
-    const doiKey = normalizeValue(article?.doi);
+    const doiKey = normalizeDoi(article?.doi);
     const titleKey = normalizeValue(article?.title);
     return { doiKey, titleKey };
 };
@@ -158,9 +167,10 @@ const loadDismissedSets = async (context) => {
         const dismissedDois = new Set();
         const dismissedTitles = new Set();
         const dismissedTokenSets = [];
+        const dismissedTokenCounts = new Map();
 
         dismissedItems.forEach(item => {
-            const doiKey = normalizeValue(item.doiKey || item.doi);
+            const doiKey = normalizeDoi(item.doiKey || item.doi);
             const titleKey = normalizeValue(item.titleKey || item.title);
             if (doiKey) dismissedDois.add(doiKey);
             if (titleKey) dismissedTitles.add(titleKey);
@@ -168,13 +178,26 @@ const loadDismissedSets = async (context) => {
             const tokens = tokenizeText(item.title || '');
             if (tokens.length > 0) {
                 dismissedTokenSets.push(new Set(tokens));
+                tokens.forEach(token => {
+                    dismissedTokenCounts.set(token, (dismissedTokenCounts.get(token) || 0) + 1);
+                });
             }
         });
 
-        return { dismissedDois, dismissedTitles, dismissedTokenSets };
+        return {
+            dismissedDois,
+            dismissedTitles,
+            dismissedTokenSets,
+            dismissedTokenCounts: Array.from(dismissedTokenCounts.entries())
+        };
     } catch (error) {
         context?.warn('[Newsreader] Failed to load dismissed items:', error.message);
-        return { dismissedDois: new Set(), dismissedTitles: new Set(), dismissedTokenSets: [] };
+        return {
+            dismissedDois: new Set(),
+            dismissedTitles: new Set(),
+            dismissedTokenSets: [],
+            dismissedTokenCounts: []
+        };
     }
 };
 
@@ -207,7 +230,7 @@ const handleDismissRequest = async (body, context) => {
         };
     }
 
-    const doiKey = normalizeValue(doi);
+    const doiKey = normalizeDoi(doi || extractDoiFromUrl(url || ''));
     const titleKey = normalizeValue(title);
     const dismissedId = buildDismissedId(doiKey, titleKey);
 
@@ -444,12 +467,14 @@ app.http('GetNewsreaderArticles', {
             } catch (e) { context.warn('[Newsreader] Could not load shortlist:', e.message); }
             
             // Build sets for filtering
-            const { dismissedDois, dismissedTitles, dismissedTokenSets } = await loadDismissedSets(context);
+            const { dismissedDois, dismissedTitles, dismissedTokenSets, dismissedTokenCounts } = await loadDismissedSets(context);
             const existingDOIs = new Set([
-                ...existingRefs.map(r => r.url).filter(u => u && u.includes('doi.org')).map(u => u.replace(/.*doi\.org\//, '')),
+                ...existingRefs
+                    .map(r => r.url)
+                    .filter(u => u && (/doi\.org\//i.test(u) || /^doi:\s*/i.test(u))),
                 ...existingRefs.map(r => r.doi).filter(Boolean),
                 ...shortlist.map(s => s.doi).filter(Boolean)
-            ].map(normalizeValue).filter(Boolean));
+            ].map(normalizeDoi).filter(Boolean));
             const existingTitles = new Set([
                 ...existingRefs.map(r => r.title ? r.title.toLowerCase().trim() : ''),
                 ...shortlist.map(s => s.title ? s.title.toLowerCase().trim() : '')
@@ -478,6 +503,16 @@ app.http('GetNewsreaderArticles', {
                 const tokens = tokenizeText(term);
                 return tokens.some(t => THESIS_SCOPE_TOKEN_SET.has(t));
             };
+
+            const dismissedNegativeTokenSet = new Set(
+                Array.isArray(dismissedTokenCounts)
+                    ? dismissedTokenCounts
+                        .filter(([token, count]) => token && count >= 2 && !THESIS_SCOPE_TOKEN_SET.has(token))
+                        .sort((a, b) => (b?.[1] || 0) - (a?.[1] || 0))
+                        .slice(0, 25)
+                        .map(([token]) => token)
+                    : []
+            );
 
             const REQUIRED_QUERY_ANCHOR = 'creative labor creative industries arts media communication';
             const anchorQuery = (query = '') => `${query} ${REQUIRED_QUERY_ANCHOR}`.replace(/\s+/g, ' ').trim();
@@ -591,6 +626,13 @@ app.http('GetNewsreaderArticles', {
 
                 const hasScopeKeyword = THESIS_SCOPE_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
                 if (!hasScopeKeyword) return false;
+
+                if (dismissedNegativeTokenSet && dismissedNegativeTokenSet.size > 0) {
+                    const tokens = tokenizeText(`${title || ''} ${abstract || ''}`);
+                    const negativeMatches = tokens.filter(t => dismissedNegativeTokenSet.has(t));
+                    const uniqueNegativeMatches = new Set(negativeMatches);
+                    if (uniqueNegativeMatches.size >= 3) return false;
+                }
                 
                 const offTopicPatterns = [
                     /\bhealthcare\b/i, /\bmedical\b/i, /\bclinical\b/i, /\bpatient\b/i,
@@ -634,7 +676,7 @@ app.http('GetNewsreaderArticles', {
                 if (/^[\d\.\s]+$/.test(title)) return false;
                 if (/^title pending/i.test(title)) return false;
                 const titleLower = normalizeValue(title);
-                const doiKey = normalizeValue(doi);
+                const doiKey = normalizeDoi(doi);
                 if (doiKey && existingDOIs.has(doiKey)) return false;
                 if (titleLower && existingTitles.has(titleLower)) return false;
                 if (doiKey && dismissedDois.has(doiKey)) return false;
@@ -717,7 +759,7 @@ app.http('GetNewsreaderArticles', {
                             isNew,
                             publishedDate: pubDate?.toISOString(),
                             apiSource: 'CrossRef',
-                            doiKey: normalizeValue(doi),
+                            doiKey: normalizeDoi(doi),
                             titleKey: normalizeValue(title)
                         });
                     }
@@ -762,7 +804,7 @@ app.http('GetNewsreaderArticles', {
                             isNew,
                             publishedDate: pubDate?.toISOString(),
                             apiSource: 'Semantic Scholar',
-                            doiKey: normalizeValue(doi || paper.paperId),
+                            doiKey: normalizeDoi(doi || paper.paperId),
                             titleKey: normalizeValue(title)
                         });
                     }
@@ -803,7 +845,7 @@ app.http('GetNewsreaderArticles', {
                                 isNew: year >= now.getFullYear() - 1,
                                 publishedDate: null,
                                 apiSource: 'Google Scholar (SerpAPI)',
-                                doiKey: normalizeValue(doi || link),
+                                doiKey: normalizeDoi(doi || link),
                                 titleKey: normalizeValue(title)
                             });
                         }
@@ -848,7 +890,7 @@ app.http('GetNewsreaderArticles', {
                             isNew,
                             publishedDate: publishedDate?.toISOString(),
                             apiSource: 'arXiv',
-                            doiKey: normalizeValue(entry.doi || entry.id),
+                            doiKey: normalizeDoi(entry.doi || entry.id),
                             titleKey: normalizeValue(title)
                         });
                     }
