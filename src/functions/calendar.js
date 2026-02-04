@@ -1,6 +1,10 @@
 const { app } = require('@azure/functions');
 const { getCalendarClient } = require('../../shared/googleAuth');
 
+function getProjectNameFromEvent(event) {
+    return event?.extendedProperties?.private?.projectName || '';
+}
+
 // GET /api/calendar - Get calendar events
 app.http('GetCalendarEvents', {
     methods: ['GET'],
@@ -46,7 +50,8 @@ app.http('GetCalendarEvents', {
                     end: end.dateTime || end.date,
                     isAllDay: !start.dateTime,
                     color: event.colorId || null,
-                    htmlLink: event.htmlLink
+                    htmlLink: event.htmlLink,
+                    projectName: getProjectNameFromEvent(event)
                 };
             });
             
@@ -63,6 +68,95 @@ app.http('GetCalendarEvents', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to fetch calendar events', details: error.message })
+            };
+        }
+    }
+});
+
+// PUT /api/calendar/{id} - Update an existing calendar event
+app.http('UpdateCalendarEvent', {
+    methods: ['PUT'],
+    authLevel: 'anonymous',
+    route: 'calendar/{id}',
+    handler: async (request, context) => {
+        try {
+            const calendarId = process.env.GOOGLE_CALENDAR_ID;
+            if (!calendarId) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'GOOGLE_CALENDAR_ID not configured' })
+                };
+            }
+
+            const eventId = request.params.id;
+            if (!eventId) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Event ID is required' })
+                };
+            }
+
+            const body = await request.json();
+            const { title, date, isAllDay, startTime, endTime, description, projectName } = body;
+
+            if (!title || !date) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'title and date are required' })
+                };
+            }
+
+            const calendar = await getCalendarClient();
+
+            let resource = {
+                summary: title,
+                description: description || ''
+            };
+
+            if (isAllDay) {
+                resource.start = { date: date };
+                resource.end = { date: date };
+            } else {
+                resource.start = { dateTime: `${date}T${startTime || '09:00'}:00`, timeZone: 'Australia/Sydney' };
+                resource.end = { dateTime: `${date}T${endTime || '10:00'}:00`, timeZone: 'Australia/Sydney' };
+            }
+
+            if (projectName) {
+                resource.extendedProperties = { private: { projectName } };
+            } else {
+                resource.extendedProperties = { private: { projectName: '' } };
+            }
+
+            context.log(`Updating calendar event: ${eventId}`);
+
+            const response = await calendar.events.patch({
+                calendarId,
+                eventId,
+                resource
+            });
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    success: true,
+                    event: {
+                        id: response.data.id,
+                        title: response.data.summary,
+                        htmlLink: response.data.htmlLink,
+                        projectName: getProjectNameFromEvent(response.data)
+                    }
+                })
+            };
+        } catch (error) {
+            context.error('Update Calendar Event Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to update calendar event', details: error.message })
             };
         }
     }
@@ -85,7 +179,7 @@ app.http('CreateCalendarEvent', {
             }
 
             const body = await request.json();
-            const { title, date, isAllDay, startTime, endTime, description } = body;
+            const { title, date, isAllDay, startTime, endTime, description, projectName } = body;
             
             if (!title || !date) {
                 return {
@@ -101,6 +195,10 @@ app.http('CreateCalendarEvent', {
                 summary: title,
                 description: description || '',
             };
+
+            if (projectName) {
+                resource.extendedProperties = { private: { projectName } };
+            }
             
             if (isAllDay) {
                 resource.start = { date: date };
