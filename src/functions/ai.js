@@ -186,7 +186,14 @@ app.http('KBRagChat', {
             }
 
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-            const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+            const model = (process.env.OPENAI_MODEL || '').toString().trim();
+            if (!model) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'OPENAI_MODEL environment variable not configured' })
+                };
+            }
 
             let historyText = '';
             if (chatId) {
@@ -263,6 +270,160 @@ app.http('KBRagChat', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'KB RAG request failed', details: error.message })
+            };
+        }
+    }
+});
+
+app.http('KBRagChatStream', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'kb/rag-chat/stream',
+    handler: async (request, context) => {
+        try {
+            const body = await request.json();
+            const query = (body?.query || body?.message || '').toString().trim();
+            const chatId = (body?.chatId || '').toString().trim();
+
+            if (!query) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'query is required' })
+                };
+            }
+
+            if (!process.env.OPENAI_API_KEY) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'OpenAI API key not configured' })
+                };
+            }
+
+            const vectorStoreId = process.env.OPENAI_VECTOR_STORE;
+            if (!vectorStoreId) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'OPENAI_VECTOR_STORE environment variable not configured' })
+                };
+            }
+
+            const model = (process.env.OPENAI_MODEL || '').toString().trim();
+            if (!model) {
+                return {
+                    status: 500,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'OPENAI_MODEL environment variable not configured' })
+                };
+            }
+
+            const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+            let historyText = '';
+            if (chatId) {
+                const chat = await getItem(process.env.COSMOSDB_CONTAINER_CHATS || 'chats', chatId, chatId);
+                if (chat && Array.isArray(chat.messages) && chat.messages.length > 0) {
+                    const recent = chat.messages.slice(-12);
+                    historyText = recent
+                        .map(m => `${(m.role || 'user').toUpperCase()}: ${(m.content || '').toString()}`)
+                        .join('\n');
+                }
+            }
+
+            const input = [
+                'You are a research assistant. Answer using ONLY the provided file search results from the user\'s academic corpus.',
+                'When you make a claim that is supported by a source, append a citation marker in the exact form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id for that source.',
+                'Keep answers concise but academically rigorous.',
+                historyText ? `Conversation so far:\n${historyText}` : '',
+                `User question: ${query}`
+            ].filter(Boolean).join('\n\n');
+
+            const basePayload = {
+                model,
+                input,
+                tools: [
+                    {
+                        type: 'file_search',
+                        vector_store_ids: [vectorStoreId]
+                    }
+                ]
+            };
+
+            const { ReadableStream } = require('stream/web');
+            const encoder = new TextEncoder();
+
+            const stream = new ReadableStream({
+                start(controller) {
+                    const send = (eventName, data) => {
+                        if (eventName) {
+                            controller.enqueue(encoder.encode(`event: ${eventName}\n`));
+                        }
+                        const payload = typeof data === 'string' ? data : JSON.stringify(data);
+                        const lines = payload.split(/\r?\n/);
+                        for (const line of lines) {
+                            controller.enqueue(encoder.encode(`data: ${line}\n`));
+                        }
+                        controller.enqueue(encoder.encode(`\n`));
+                    };
+
+                    (async () => {
+                        let fullText = '';
+                        try {
+                            const openaiStream = await openai.responses.create({ ...basePayload, stream: true });
+
+                            for await (const event of openaiStream) {
+                                if (event?.type === 'response.output_text.delta' && typeof event?.delta === 'string') {
+                                    fullText += event.delta;
+                                    send('delta', event.delta);
+                                }
+                            }
+
+                            const citationIds = extractCitationIds(fullText);
+                            const citations = [];
+                            for (const fileId of citationIds.slice(0, 12)) {
+                                try {
+                                    const cite = await lookupCitationByFileId(fileId);
+                                    if (cite) citations.push(cite);
+                                } catch (e) {
+                                    citations.push({
+                                        id: fileId,
+                                        authors: 'Unknown Author',
+                                        year: 'n.d.',
+                                        title: 'Unknown Title',
+                                        pageUrl: '',
+                                        apa7: 'Source unavailable'
+                                    });
+                                }
+                            }
+
+                            send('done', { content: fullText, citations });
+                            controller.close();
+                        } catch (err) {
+                            send('error', { error: 'KB RAG stream failed', details: err?.message || String(err) });
+                            controller.close();
+                        }
+                    })();
+                }
+            });
+
+            return {
+                status: 200,
+                enableContentNegotiation: false,
+                headers: {
+                    'Content-Type': 'text/event-stream; charset=utf-8',
+                    'Cache-Control': 'no-cache, no-transform',
+                    'Connection': 'keep-alive'
+                },
+                body: stream
+            };
+        } catch (error) {
+            context.error('[KB RAG Chat Stream] Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'KB RAG stream setup failed', details: error.message })
             };
         }
     }
