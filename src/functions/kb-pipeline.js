@@ -2,6 +2,7 @@ const { app } = require('@azure/functions');
 const { downloadBlob, uploadBlob } = require('../../shared/blobClient');
 const { getItem, upsertItem, createItem, queryItems } = require('../../shared/cosmosClient');
 const { PDFDocument } = require('pdf-lib');
+const OpenAI = require('openai');
 
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
@@ -701,6 +702,323 @@ app.http('KBJobStatus', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to get job status', details: error.message })
+            };
+        }
+    }
+});
+
+// Helper: Truncate string to max length for OpenAI attributes (512 char limit)
+function truncateForAttribute(str, maxLen = 500) {
+    if (!str || typeof str !== 'string') return '';
+    if (str.length <= maxLen) return str;
+    return str.substring(0, maxLen - 3) + '...';
+}
+
+// Helper: Build file content with metadata header for vector store
+function buildVectorFileContent(page) {
+    const meta = page.metadata || {};
+    const header = [
+        '[DOC_METADATA]',
+        `referenceId: ${page.referenceId || ''}`,
+        `pageNumber: ${page.pageNumber || ''}`,
+        `title: ${meta.title || ''}`,
+        `authors: ${meta.authors || ''}`,
+        `year: ${meta.year || ''}`,
+        `type: ${meta.type || ''}`,
+        `source: ${meta.source || ''}`,
+        '[/DOC_METADATA]',
+        '',
+        ''
+    ].join('\n');
+    
+    return header + (page.ocrText || '');
+}
+
+// Helper: Build attributes object for OpenAI vector store
+function buildVectorAttributes(page) {
+    const meta = page.metadata || {};
+    return {
+        referenceId: page.referenceId || '',
+        pageNumber: String(page.pageNumber || ''),
+        title: truncateForAttribute(meta.title),
+        authors: truncateForAttribute(meta.authors),
+        year: String(meta.year || ''),
+        type: meta.type || '',
+        source: truncateForAttribute(meta.source),
+        blobUrl: truncateForAttribute(page.blobUrl)
+    };
+}
+
+// POST /api/kb/vectorize/{referenceId} - Upload OCR'd pages to OpenAI vector store
+app.http('KBVectorizePages', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'kb/vectorize/{referenceId}',
+    handler: async (request, context) => {
+        const referenceId = request.params.referenceId;
+        context.log(`[KB Vectorize] Starting for reference: ${referenceId}`);
+
+        const VECTOR_STORE_ID = process.env.OPENAI_VECTOR_STORE;
+        const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+        if (!VECTOR_STORE_ID) {
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'OPENAI_VECTOR_STORE environment variable not configured' })
+            };
+        }
+
+        if (!OPENAI_API_KEY) {
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'OPENAI_API_KEY environment variable not configured' })
+            };
+        }
+
+        let requestedJobId = null;
+        try {
+            const body = await request.json();
+            if (body && typeof body.jobId === 'string') {
+                requestedJobId = body.jobId.trim();
+            }
+        } catch (error) {
+            requestedJobId = null;
+        }
+
+        try {
+            // Initialize OpenAI client
+            const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+            // Fetch the reference
+            const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
+            if (!reference) {
+                return {
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Reference not found' })
+                };
+            }
+
+            // Query pages with ocrStatus=1 and no openaiVector yet
+            const pages = await queryItems(CONTAINER_PAGES, {
+                query: `SELECT * FROM c 
+                        WHERE c.referenceId = @referenceId 
+                          AND c.ocrStatus = 1 
+                          AND (NOT IS_DEFINED(c.openaiVector) OR c.openaiVector = null OR c.openaiVector.fileId = null)
+                        ORDER BY c.pageNumber`,
+                parameters: [{ name: '@referenceId', value: referenceId }]
+            });
+
+            if (!pages || pages.length === 0) {
+                // Check if all pages are already vectorized
+                const allPages = await queryItems(CONTAINER_PAGES, {
+                    query: 'SELECT * FROM c WHERE c.referenceId = @referenceId',
+                    parameters: [{ name: '@referenceId', value: referenceId }]
+                });
+
+                if (!allPages || allPages.length === 0) {
+                    return {
+                        status: 400,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.' })
+                    };
+                }
+
+                const alreadyVectorized = allPages.filter(p => p.openaiVector && p.openaiVector.fileId);
+                if (alreadyVectorized.length === allPages.length) {
+                    return {
+                        status: 200,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            success: true,
+                            message: 'All pages already vectorized',
+                            referenceId,
+                            totalPages: allPages.length,
+                            pagesVectorized: alreadyVectorized.length
+                        })
+                    };
+                }
+
+                const pendingOcr = allPages.filter(p => p.ocrStatus !== 1);
+                if (pendingOcr.length > 0) {
+                    return {
+                        status: 400,
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            error: 'Some pages have not completed OCR yet. Run Step 2 first.',
+                            pendingOcrCount: pendingOcr.length
+                        })
+                    };
+                }
+            }
+
+            const totalPages = pages.length;
+            const jobId = requestedJobId || `job_${referenceId}_vectorize_${Date.now()}`;
+            const jobRecord = {
+                id: jobId,
+                referenceId: referenceId,
+                type: 'vectorize-pages',
+                status: 'processing',
+                totalPages: totalPages,
+                pagesCompleted: 0,
+                pagesFailed: 0,
+                pagesSucceeded: 0,
+                currentPage: 0,
+                vectorStoreId: VECTOR_STORE_ID,
+                startedAt: new Date().toISOString(),
+                ttl: JOB_TTL_SECONDS
+            };
+
+            await createItem(CONTAINER_JOBS, jobRecord);
+            context.log(`[KB Vectorize] Created job record: ${jobId}`);
+            context.log(`[KB Vectorize] Vector Store ID: ${VECTOR_STORE_ID}`);
+            context.log(`[KB Vectorize] Pages to process: ${totalPages}`);
+
+            let pagesSucceeded = 0;
+            let pagesFailed = 0;
+            let pagesProcessed = 0;
+
+            for (const page of pages) {
+                const pageNumber = page.pageNumber;
+                pagesProcessed += 1;
+                context.log(`[KB Vectorize] Processing page ${pageNumber} (${pagesProcessed}/${totalPages})`);
+
+                try {
+                    // Build file content and attributes
+                    const fileContent = buildVectorFileContent(page);
+                    const attributes = buildVectorAttributes(page);
+                    const fileName = `${referenceId}_page_${String(pageNumber).padStart(5, '0')}.txt`;
+
+                    // Upload file to OpenAI
+                    const file = await openai.files.create({
+                        file: new File([fileContent], fileName, { type: 'text/plain' }),
+                        purpose: 'assistants'
+                    });
+
+                    context.log(`[KB Vectorize] File uploaded: ${file.id}`);
+
+                    // Attach to vector store with attributes and chunking strategy
+                    const vectorStoreFile = await openai.vectorStores.files.createAndPoll(
+                        VECTOR_STORE_ID,
+                        {
+                            file_id: file.id,
+                            attributes: attributes,
+                            chunking_strategy: {
+                                type: 'static',
+                                static: {
+                                    max_chunk_size_tokens: 800,
+                                    chunk_overlap_tokens: 200
+                                }
+                            }
+                        }
+                    );
+
+                    context.log(`[KB Vectorize] Added to vector store: ${vectorStoreFile.id}, status: ${vectorStoreFile.status}`);
+
+                    if (vectorStoreFile.status === 'completed') {
+                        pagesSucceeded += 1;
+                        
+                        // Update Cosmos page record with vector store linkage
+                        await upsertItem(CONTAINER_PAGES, {
+                            ...page,
+                            openaiVector: {
+                                vectorStoreId: VECTOR_STORE_ID,
+                                fileId: file.id,
+                                vectorStoreFileId: vectorStoreFile.id,
+                                uploadedAt: new Date().toISOString()
+                            }
+                        });
+                    } else {
+                        pagesFailed += 1;
+                        context.error(`[KB Vectorize] Vector store file status: ${vectorStoreFile.status}`);
+                        
+                        await upsertItem(CONTAINER_PAGES, {
+                            ...page,
+                            openaiVector: {
+                                vectorStoreId: VECTOR_STORE_ID,
+                                fileId: file.id,
+                                vectorStoreFileId: vectorStoreFile.id,
+                                status: vectorStoreFile.status,
+                                error: vectorStoreFile.last_error?.message || 'Failed to index',
+                                uploadedAt: new Date().toISOString()
+                            }
+                        });
+                    }
+
+                } catch (pageError) {
+                    pagesFailed += 1;
+                    context.error(`[KB Vectorize] Error processing page ${pageNumber}:`, pageError.message);
+                    
+                    await upsertItem(CONTAINER_PAGES, {
+                        ...page,
+                        openaiVector: {
+                            vectorStoreId: VECTOR_STORE_ID,
+                            error: pageError.message,
+                            failedAt: new Date().toISOString()
+                        }
+                    });
+                }
+
+                // Update job progress
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    pagesCompleted: pagesProcessed,
+                    pagesSucceeded,
+                    pagesFailed,
+                    currentPage: pageNumber,
+                    lastUpdated: new Date().toISOString()
+                });
+            }
+
+            // Update reference status
+            const allSucceeded = pagesFailed === 0 && pagesSucceeded === totalPages;
+            const newStatus = allSucceeded ? 3 : (reference.ref_knowledge_status || 2);
+            const updatedReference = {
+                ...reference,
+                ref_knowledge_status: newStatus,
+                kb_vectorize_completed: new Date().toISOString(),
+                kb_vectorize_pages_succeeded: pagesSucceeded,
+                kb_vectorize_pages_failed: pagesFailed,
+                kb_vector_store_id: VECTOR_STORE_ID
+            };
+            await upsertItem(CONTAINER_REFERENCES, updatedReference);
+
+            // Mark job complete
+            await upsertItem(CONTAINER_JOBS, {
+                ...jobRecord,
+                status: 'complete',
+                pagesCompleted: totalPages,
+                pagesSucceeded,
+                pagesFailed,
+                completedAt: new Date().toISOString(),
+                ttl: JOB_TTL_SECONDS
+            });
+
+            context.log(`[KB Vectorize] Completed! ${pagesSucceeded}/${totalPages} pages vectorized`);
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    success: true,
+                    jobId,
+                    referenceId,
+                    vectorStoreId: VECTOR_STORE_ID,
+                    totalPages,
+                    pagesSucceeded,
+                    pagesFailed,
+                    newStatus
+                })
+            };
+
+        } catch (error) {
+            context.error('[KB Vectorize] Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to vectorize pages', details: error.message })
             };
         }
     }
