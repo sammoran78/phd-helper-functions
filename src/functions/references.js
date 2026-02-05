@@ -156,17 +156,17 @@ app.http('UpdateReference', {
     }
 });
 
-// GET /api/references/bibliography - Get references with ref_knowledge_status=4 for bibliography
+// GET /api/references/bibliography - Get references with ref_knowledge_status>=3 for bibliography
 app.http('GetBibliography', {
     methods: ['GET'],
     authLevel: 'anonymous',
     route: 'references/bibliography',
     handler: async (request, context) => {
         try {
-            context.log('Loading bibliography references (status=4) from CosmosDB');
+            context.log('Loading bibliography references (status>=3) from CosmosDB');
             
             const querySpec = {
-                query: 'SELECT * FROM c WHERE c.ref_knowledge_status = 4 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
             };
             
             const references = await queryItems(CONTAINER_NAME, querySpec);
@@ -261,7 +261,7 @@ app.http('ExportBibliographyDocx', {
             context.log('Exporting bibliography to DOCX');
 
             const references = await queryItems(CONTAINER_NAME, {
-                query: 'SELECT * FROM c WHERE c.ref_knowledge_status = 4 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
             });
 
             const sorted = references.sort((a, b) => {
