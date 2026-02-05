@@ -1,5 +1,16 @@
 const { app } = require('@azure/functions');
 const { getDriveClient } = require('../../shared/googleAuth');
+const { upsertItem } = require('../../shared/cosmosClient');
+
+const ANALYTICS_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
+const WRITING_ANALYTICS_LATEST_ID = 'writing_analytics_latest';
+
+function countWords(text) {
+    const s = (text || '').replace(/\s+/g, ' ').trim();
+    if (!s) return 0;
+    const matches = s.match(/\S+/g);
+    return matches ? matches.length : 0;
+}
 
 // GET /api/drive/files - List files in a folder
 app.http('GetDriveFiles', {
@@ -38,6 +49,40 @@ app.http('GetDriveFiles', {
                 webViewLink: file.webViewLink,
                 webContentLink: file.webContentLink
             }));
+
+            // Persist word count analytics for Working DRAFT (used by dashboard refresh)
+            try {
+                const workingDraft = files.find(f =>
+                    (f?.mimeType === 'application/vnd.google-apps.document') &&
+                    (typeof f?.name === 'string') &&
+                    f.name.toLowerCase().includes('working draft')
+                );
+
+                if (workingDraft?.id) {
+                    const exportRes = await drive.files.export(
+                        { fileId: workingDraft.id, mimeType: 'text/plain' },
+                        { responseType: 'text' }
+                    );
+
+                    const wordCount = countWords(exportRes?.data);
+
+                    await upsertItem(ANALYTICS_CONTAINER, {
+                        id: WRITING_ANALYTICS_LATEST_ID,
+                        type: 'writing_analytics',
+                        generatedAt: new Date().toISOString(),
+                        documents: [
+                            {
+                                id: workingDraft.id,
+                                title: workingDraft.name,
+                                wordCount,
+                                modifiedTime: workingDraft.modifiedTime || null
+                            }
+                        ]
+                    });
+                }
+            } catch (e) {
+                context.warn('[Drive] Failed to upsert writing analytics:', e.message);
+            }
             
             context.log(`Found ${files.length} files`);
             

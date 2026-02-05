@@ -501,6 +501,7 @@ app.http('GetDashboardAnalytics', {
                     status: 200,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        newArticles: { current: 0, weekChange: 0 },
                         sourcesParsed: { current: 0, weekChange: 0 },
                         wordCount: { current: 0, weekChange: 0, target: 80000 },
                         daysToMilestone: { current: 0, milestoneName: 'No milestone set' },
@@ -522,6 +523,10 @@ app.http('GetDashboardAnalytics', {
             const weekAgoEntry = history.find(h => new Date(h.timestamp).getTime() <= oneWeekAgo) || history[history.length - 1];
             
             const response = {
+                newArticles: {
+                    current: snapshot.newArticles || 0,
+                    weekChange: weekAgoEntry ? (snapshot.newArticles || 0) - (weekAgoEntry.newArticles || 0) : 0
+                },
                 sourcesParsed: {
                     current: snapshot.sourcesParsed || 0,
                     weekChange: weekAgoEntry ? (snapshot.sourcesParsed || 0) - (weekAgoEntry.sourcesParsed || 0) : 0
@@ -567,7 +572,7 @@ app.http('UpdateDashboardAnalytics', {
     handler: async (request, context) => {
         try {
             const body = await request.json();
-            const { sourcesParsed, wordCount, daysToMilestone, milestoneName, surveyResponses, wordCountTarget } = body;
+            const { newArticles, sourcesParsed, wordCount, daysToMilestone, milestoneName, surveyResponses, wordCountTarget } = body;
             
             // Get existing snapshot or create new
             let snapshot = await getItem(CONTAINER_NAME, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID);
@@ -583,6 +588,7 @@ app.http('UpdateDashboardAnalytics', {
             const now = new Date().toISOString();
             const historyEntry = {
                 timestamp: now,
+                newArticles: snapshot.newArticles,
                 sourcesParsed: snapshot.sourcesParsed,
                 wordCount: snapshot.wordCount,
                 surveyResponses: snapshot.surveyResponses
@@ -592,6 +598,7 @@ app.http('UpdateDashboardAnalytics', {
             const lastHistoryEntry = snapshot.history?.[0];
             const shouldAddHistory = !lastHistoryEntry || 
                 (Date.now() - new Date(lastHistoryEntry.timestamp).getTime() > 60 * 60 * 1000) ||
+                lastHistoryEntry.newArticles !== snapshot.newArticles ||
                 lastHistoryEntry.sourcesParsed !== snapshot.sourcesParsed ||
                 lastHistoryEntry.wordCount !== snapshot.wordCount;
             
@@ -600,6 +607,7 @@ app.http('UpdateDashboardAnalytics', {
             }
             
             // Update current values
+            if (newArticles !== undefined) snapshot.newArticles = newArticles;
             if (sourcesParsed !== undefined) snapshot.sourcesParsed = sourcesParsed;
             if (wordCount !== undefined) snapshot.wordCount = wordCount;
             if (daysToMilestone !== undefined) snapshot.daysToMilestone = daysToMilestone;
@@ -638,6 +646,18 @@ app.http('RefreshDashboardAnalytics', {
     handler: async (request, context) => {
         try {
             // Fetch counts from various sources
+
+            // 0. Count shortlisted reading articles (New Articles)
+            let newArticles = 0;
+            try {
+                const shortlistQuery = 'SELECT * FROM c WHERE c.type = "shortlist" OFFSET 0 LIMIT 1';
+                const shortlistItems = await queryItems(CONTAINER_NAME, { query: shortlistQuery });
+                const shortlistDoc = shortlistItems.length > 0 ? shortlistItems[0] : null;
+                const articles = Array.isArray(shortlistDoc?.articles) ? shortlistDoc.articles : [];
+                newArticles = articles.length;
+            } catch (e) {
+                context.warn('Could not fetch shortlist count:', e.message);
+            }
             
             // 1. Count references (sources parsed)
             const referencesQuery = 'SELECT VALUE COUNT(1) FROM c WHERE NOT IS_DEFINED(c.dismissed) OR c.dismissed != true';
@@ -702,6 +722,7 @@ app.http('RefreshDashboardAnalytics', {
             if (snapshot.sourcesParsed !== undefined) {
                 const historyEntry = {
                     timestamp: now,
+                    newArticles: snapshot.newArticles,
                     sourcesParsed: snapshot.sourcesParsed,
                     wordCount: snapshot.wordCount,
                     surveyResponses: snapshot.surveyResponses
@@ -710,6 +731,7 @@ app.http('RefreshDashboardAnalytics', {
             }
             
             // Update with fresh values
+            snapshot.newArticles = newArticles;
             snapshot.sourcesParsed = sourcesParsed;
             snapshot.wordCount = wordCount;
             snapshot.daysToMilestone = daysToMilestone;
@@ -729,6 +751,10 @@ app.http('RefreshDashboardAnalytics', {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
+                    newArticles: {
+                        current: newArticles,
+                        weekChange: weekAgoEntry ? newArticles - (weekAgoEntry.newArticles || 0) : 0
+                    },
                     sourcesParsed: {
                         current: sourcesParsed,
                         weekChange: weekAgoEntry ? sourcesParsed - (weekAgoEntry.sourcesParsed || 0) : 0
