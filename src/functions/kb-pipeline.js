@@ -22,10 +22,10 @@ app.http('KBSplitPDF', {
 
         const formatPrintedPageForBlob = (n) => {
             const num = Number(n);
-            if (!Number.isFinite(num)) return '0000';
+            if (!Number.isFinite(num)) return '00000';
             const sign = num < 0 ? '-' : '';
             const abs = Math.abs(Math.trunc(num));
-            return `${sign}${String(abs).padStart(4, '0')}`;
+            return `${sign}${String(abs).padStart(5, '0')}`;
         };
 
         try {
@@ -145,7 +145,7 @@ app.http('KBSplitPDF', {
                 try {
                     const printedPageNumber = startPage + pageNum - 1;
                     const paddedPageNum = formatPrintedPageForBlob(printedPageNumber);
-                    const paddedPdfPageNum = String(pageNum).padStart(4, '0');
+                    
                     
                     // Create a new PDF with just this page
                     const singlePagePdf = await PDFDocument.create();
@@ -167,7 +167,7 @@ app.http('KBSplitPDF', {
                     
                     // Create CosmosDB record for this page
                     const pageRecord = {
-                        id: `${referenceId}_page_${paddedPdfPageNum}`,
+                        id: `${referenceId}_page_${paddedPageNum}`,
                         referenceId: referenceId,
                         pageNumber: printedPageNumber,
                         pdfPageNumber: pageNum,
