@@ -8,6 +8,7 @@ const { getItem, upsertItem, queryItems } = require('../../shared/cosmosClient')
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const WRITING_ANALYTICS_LATEST_ID = 'writing_analytics_latest';
 const LANDSCAPE_DOC_ID = 'analytics_landscape';
 const LANDSCAPE_TTL_MS = 24 * 60 * 60 * 1000;
 const COFFEE_COUNTER_DOC_ID = 'coffee_counter';
@@ -667,15 +668,30 @@ app.http('RefreshDashboardAnalytics', {
             // 2. Get word count from Writing Analytics (look for "Working DRAFT" document)
             let wordCount = 0;
             try {
-                const writingQuery = 'SELECT * FROM c WHERE c.type = "writing_analytics" ORDER BY c._ts DESC OFFSET 0 LIMIT 1';
-                const writingResult = await queryItems(CONTAINER_NAME, { query: writingQuery });
-                if (writingResult.length > 0 && writingResult[0].documents) {
-                    const workingDraft = writingResult[0].documents.find(d => 
-                        d.title && d.title.toLowerCase().includes('working draft')
-                    );
-                    if (workingDraft) {
-                        wordCount = workingDraft.wordCount || 0;
-                    }
+                const workingDraftId = process.env.GOOGLE_WORKING_DRAFT_ID;
+
+                let writingDoc = await getItem(CONTAINER_NAME, WRITING_ANALYTICS_LATEST_ID, WRITING_ANALYTICS_LATEST_ID);
+                if (!writingDoc) {
+                    const writingQuery = 'SELECT * FROM c WHERE c.type = "writing_analytics" ORDER BY c._ts DESC OFFSET 0 LIMIT 1';
+                    const writingResult = await queryItems(CONTAINER_NAME, { query: writingQuery });
+                    writingDoc = writingResult.length > 0 ? writingResult[0] : null;
+                }
+
+                const documents = Array.isArray(writingDoc?.documents) ? writingDoc.documents : [];
+                let workingDraft = null;
+
+                if (workingDraftId) {
+                    workingDraft = documents.find(d => d?.id === workingDraftId) || null;
+                }
+
+                if (!workingDraft) {
+                    workingDraft = documents.find(d =>
+                        d?.title && d.title.toLowerCase().includes('working draft')
+                    ) || null;
+                }
+
+                if (workingDraft) {
+                    wordCount = workingDraft.wordCount || 0;
                 }
             } catch (e) {
                 context.warn('Could not fetch word count:', e.message);

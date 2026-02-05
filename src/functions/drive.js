@@ -52,13 +52,41 @@ app.http('GetDriveFiles', {
 
             // Persist word count analytics for Working DRAFT (used by dashboard refresh)
             try {
-                const workingDraft = files.find(f =>
-                    (f?.mimeType === 'application/vnd.google-apps.document') &&
-                    (typeof f?.name === 'string') &&
-                    f.name.toLowerCase().includes('working draft')
-                );
+                const workingDraftId = process.env.GOOGLE_WORKING_DRAFT_ID;
 
-                if (workingDraft?.id) {
+                let workingDraft = null;
+                if (workingDraftId) {
+                    workingDraft = files.find(f => f?.id === workingDraftId) || null;
+                    if (!workingDraft) {
+                        try {
+                            const metaRes = await drive.files.get({
+                                fileId: workingDraftId,
+                                fields: 'id,name,mimeType,modifiedTime'
+                            });
+                            const meta = metaRes?.data;
+                            if (meta?.id) {
+                                workingDraft = {
+                                    id: meta.id,
+                                    name: meta.name,
+                                    mimeType: meta.mimeType,
+                                    modifiedTime: meta.modifiedTime
+                                };
+                            }
+                        } catch (e) {
+                            context.warn('[Drive] Failed to load Working Draft metadata by ID:', e.message);
+                        }
+                    }
+                }
+
+                if (!workingDraft) {
+                    workingDraft = files.find(f =>
+                        (f?.mimeType === 'application/vnd.google-apps.document') &&
+                        (typeof f?.name === 'string') &&
+                        f.name.toLowerCase().includes('working draft')
+                    ) || null;
+                }
+
+                if (workingDraft?.id && workingDraft?.mimeType === 'application/vnd.google-apps.document') {
                     const exportRes = await drive.files.export(
                         { fileId: workingDraft.id, mimeType: 'text/plain' },
                         { responseType: 'text' }
