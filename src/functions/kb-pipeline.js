@@ -18,14 +18,31 @@ app.http('KBSplitPDF', {
     handler: async (request, context) => {
         const referenceId = request.params.referenceId;
         let requestedJobId = null;
+        let startPage = 1;
+
+        const formatPrintedPageForBlob = (n) => {
+            const num = Number(n);
+            if (!Number.isFinite(num)) return '0000';
+            const sign = num < 0 ? '-' : '';
+            const abs = Math.abs(Math.trunc(num));
+            return `${sign}${String(abs).padStart(4, '0')}`;
+        };
 
         try {
             const body = await request.json();
             if (body && typeof body.jobId === 'string') {
                 requestedJobId = body.jobId.trim();
             }
+
+            if (body && (typeof body.startPage === 'number' || typeof body.startPage === 'string')) {
+                const parsed = parseInt(body.startPage, 10);
+                if (Number.isFinite(parsed)) {
+                    startPage = parsed;
+                }
+            }
         } catch (error) {
             requestedJobId = null;
+            startPage = 1;
         }
         
         context.log(`[KB Split PDF] Starting for reference: ${referenceId}`);
@@ -126,7 +143,9 @@ app.http('KBSplitPDF', {
                 context.log(`[KB Split PDF] Processing page ${pageNum}/${totalPages}`);
                 
                 try {
-                    const paddedPageNum = String(pageNum).padStart(4, '0');
+                    const printedPageNumber = startPage + pageNum - 1;
+                    const paddedPageNum = formatPrintedPageForBlob(printedPageNumber);
+                    const paddedPdfPageNum = String(pageNum).padStart(4, '0');
                     
                     // Create a new PDF with just this page
                     const singlePagePdf = await PDFDocument.create();
@@ -148,9 +167,11 @@ app.http('KBSplitPDF', {
                     
                     // Create CosmosDB record for this page
                     const pageRecord = {
-                        id: `${referenceId}_page_${paddedPageNum}`,
+                        id: `${referenceId}_page_${paddedPdfPageNum}`,
                         referenceId: referenceId,
-                        pageNumber: pageNum,
+                        pageNumber: printedPageNumber,
+                        pdfPageNumber: pageNum,
+                        startPage: startPage,
                         totalPages: totalPages,
                         blobUrl: blobUrl,
                         blobName: pageBlobName,
@@ -160,10 +181,11 @@ app.http('KBSplitPDF', {
                         dateCreated: new Date().toISOString()
                     };
                     
-                    await createItem(CONTAINER_PAGES, pageRecord);
+                    await upsertItem(CONTAINER_PAGES, pageRecord);
                     
                     processedPages.push({
-                        pageNumber: pageNum,
+                        pageNumber: printedPageNumber,
+                        pdfPageNumber: pageNum,
                         blobUrl: blobUrl,
                         recordId: pageRecord.id
                     });
