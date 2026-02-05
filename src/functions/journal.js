@@ -9,6 +9,51 @@ const crypto = require('crypto');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_COMMENTS || 'comments';
 
+function base64UrlEncode(value) {
+    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    return buf
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+}
+
+function base64UrlDecodeToString(value) {
+    const s = (value || '').toString().replace(/-/g, '+').replace(/_/g, '/');
+    const pad = '='.repeat((4 - (s.length % 4)) % 4);
+    return Buffer.from(s + pad, 'base64').toString('utf8');
+}
+
+function getAuthUser(request) {
+    try {
+        const header = request.headers.get('authorization') || '';
+        const m = header.match(/^Bearer\s+(.+)$/i);
+        if (!m) return null;
+
+        const token = m[1];
+        const parts = token.split('.');
+        if (parts.length !== 3) return null;
+
+        const [headerB64, payloadB64, sigB64] = parts;
+        const data = `${headerB64}.${payloadB64}`;
+        const secret = process.env.AUTH_JWT_SECRET || 'dev-secret-change-me';
+
+        const expectedSig = base64UrlEncode(
+            crypto.createHmac('sha256', secret).update(data).digest()
+        );
+
+        if (expectedSig !== sigB64) return null;
+
+        const payloadJson = base64UrlDecodeToString(payloadB64);
+        const payload = JSON.parse(payloadJson);
+        if (payload?.exp && payload.exp < Date.now() / 1000) return null;
+        if (!payload?.email) return null;
+        return payload;
+    } catch {
+        return null;
+    }
+}
+
 // GET /api/journal/entries - Get all journal entries (filtered by privacy)
 app.http('GetJournalEntries', {
     methods: ['GET'],
@@ -16,9 +61,17 @@ app.http('GetJournalEntries', {
     route: 'journal/entries',
     handler: async (request, context) => {
         try {
-            // Get requesting user from query param or header
-            const requestingUser = request.query.get('user') || request.headers.get('x-user-email') || '';
-            
+            const authUser = getAuthUser(request);
+            const requestingUser = authUser?.email || '';
+
+            if (!requestingUser) {
+                return {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ success: false, error: 'Unauthorized' })
+                };
+            }
+
             context.log(`[Journal] Fetching entries for user: ${requestingUser || 'anonymous'}`);
             
             // Query all entries, ordered by timestamp descending
@@ -30,8 +83,8 @@ app.http('GetJournalEntries', {
             
             // Filter: show public entries + private entries only if user is author
             const visibleEntries = allEntries.filter(entry => {
-                if (!entry.isPrivate) return true;
-                // Private entry: only visible to author
+                if (!entry?.isPrivate) return true;
+                if (!requestingUser) return false;
                 return entry.authorEmail && entry.authorEmail.toLowerCase() === requestingUser.toLowerCase();
             });
             
@@ -48,7 +101,8 @@ app.http('GetJournalEntries', {
                         author: e.author,
                         authorEmail: e.authorEmail,
                         timestamp: e.timestamp,
-                        isPrivate: e.isPrivate || false
+                        isPrivate: e.isPrivate || false,
+                        canDelete: !!(requestingUser && e.authorEmail && e.authorEmail.toLowerCase() === requestingUser.toLowerCase())
                     }))
                 })
             };
@@ -70,8 +124,17 @@ app.http('CreateJournalEntry', {
     route: 'journal/entry',
     handler: async (request, context) => {
         try {
+            const authUser = getAuthUser(request);
+            if (!authUser) {
+                return {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ success: false, error: 'Unauthorized' })
+                };
+            }
+
             const body = await request.json();
-            const { content, author, authorEmail, isPrivate } = body;
+            const { content, isPrivate } = body;
             
             if (!content || !content.trim()) {
                 return {
@@ -81,16 +144,11 @@ app.http('CreateJournalEntry', {
                 };
             }
             
-            if (!author || !authorEmail) {
-                return {
-                    status: 400,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ success: false, error: 'Author information is required' })
-                };
-            }
-            
             const entryId = `journal_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
             const timestamp = new Date().toISOString();
+
+            const author = authUser.name || authUser.email || 'User';
+            const authorEmail = authUser.email;
             
             const entry = {
                 id: entryId,
@@ -118,7 +176,8 @@ app.http('CreateJournalEntry', {
                         author: created.author,
                         authorEmail: created.authorEmail,
                         timestamp: created.timestamp,
-                        isPrivate: created.isPrivate
+                        isPrivate: created.isPrivate,
+                        canDelete: true
                     }
                 })
             };
@@ -140,8 +199,17 @@ app.http('DeleteJournalEntry', {
     route: 'journal/entry/{id}',
     handler: async (request, context) => {
         try {
+            const authUser = getAuthUser(request);
+            if (!authUser) {
+                return {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ success: false, error: 'Unauthorized' })
+                };
+            }
+
             const entryId = request.params.id;
-            const requestingUser = request.query.get('user') || request.headers.get('x-user-email') || '';
+            const requestingUser = authUser.email || '';
             
             if (!entryId) {
                 return {
