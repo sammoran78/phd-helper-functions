@@ -8,6 +8,65 @@ const SHORTLIST_ID = 'shortlist';
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
 
+const normalizeSortKey = (value) => {
+    const s = (value || '').toString();
+    return s
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[\u200B\u200E\u200F\uFEFF]/g, '')
+        .trim()
+        .toLowerCase();
+};
+
+const extractPrimaryAuthorToken = (reference) => {
+    let s = (reference?.authors || reference?.author || '').toString();
+    if (!s) s = (reference?.apa7 || '').toString();
+    s = s.replace(/^[^A-Za-z0-9]+/g, '').trim();
+
+    // If this is APA7-like, authors appear before the year in parentheses.
+    s = s.split('(')[0].trim();
+
+    // Remove common separators for multiple authors (keep the first author/organization)
+    s = s.split('&')[0].trim();
+
+    // If formatted as "Surname, Initials", take surname
+    const commaIdx = s.indexOf(',');
+    if (commaIdx > 0) {
+        s = s.slice(0, commaIdx).trim();
+    }
+
+    s = s.replace(/[.\s]+$/g, '').trim();
+    return s;
+};
+
+const getBibliographySortKey = (reference) => {
+    const authorToken = extractPrimaryAuthorToken(reference);
+    const authorKey = normalizeSortKey(authorToken);
+    if (authorKey) return authorKey;
+
+    const titleKey = normalizeSortKey(reference?.title);
+    if (titleKey) return titleKey;
+
+    return normalizeSortKey(reference?.id);
+};
+
+const sortBibliographyReferences = (references) => {
+    const list = Array.isArray(references) ? references : [];
+    return list.sort((a, b) => {
+        const keyA = getBibliographySortKey(a);
+        const keyB = getBibliographySortKey(b);
+        const cmp = keyA.localeCompare(keyB, undefined, { sensitivity: 'base' });
+        if (cmp !== 0) return cmp;
+
+        const titleA = normalizeSortKey(a?.title);
+        const titleB = normalizeSortKey(b?.title);
+        const tcmp = titleA.localeCompare(titleB, undefined, { sensitivity: 'base' });
+        if (tcmp !== 0) return tcmp;
+
+        return normalizeSortKey(a?.id).localeCompare(normalizeSortKey(b?.id));
+    });
+};
+
 const getReferenceKeys = (reference) => {
     const doiKey = normalizeValue(reference?.doi);
     const titleKey = normalizeValue(reference?.title);
@@ -170,13 +229,8 @@ app.http('GetBibliography', {
             };
             
             const references = await queryItems(CONTAINER_NAME, querySpec);
-            
-            // Sort by author alphabetically (extract first author surname for sorting)
-            const sorted = references.sort((a, b) => {
-                const authorsA = (a.authors || a.author || '').toLowerCase();
-                const authorsB = (b.authors || b.author || '').toLowerCase();
-                return authorsA.localeCompare(authorsB);
-            });
+
+            const sorted = sortBibliographyReferences(references);
             
             context.log(`Loaded ${sorted.length} bibliography references`);
             
@@ -264,11 +318,7 @@ app.http('ExportBibliographyDocx', {
                 query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
             });
 
-            const sorted = references.sort((a, b) => {
-                const authorsA = (a.authors || a.author || '').toLowerCase();
-                const authorsB = (b.authors || b.author || '').toLowerCase();
-                return authorsA.localeCompare(authorsB);
-            });
+            const sorted = sortBibliographyReferences(references);
 
             const paragraphs = sorted.map(ref => {
                 const apa7 = (ref.apa7 || '').toString().trim();
