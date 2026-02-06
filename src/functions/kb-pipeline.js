@@ -13,6 +13,20 @@ const JOB_TTL_SECONDS = 7200; // Auto-delete job records after 2 hours
 const OCR_TIMEOUT_MS = Number(process.env.KB_OCR_TIMEOUT_MS || 120000);
 const VECTORIZE_TIMEOUT_MS = Number(process.env.KB_VECTORIZE_TIMEOUT_MS || 180000);
 
+// CORS headers helper
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+function withCorsHeaders(response) {
+    return {
+        ...response,
+        headers: {
+            ...response.headers,
+            'Access-Control-Allow-Origin': CORS_ORIGIN,
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        }
+    };
+}
+
 async function withTimeout(promise, timeoutMs, label) {
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
@@ -69,11 +83,11 @@ app.http('KBSplitPDF', {
             // 1. Fetch the reference from CosmosDB
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
-                return {
+                return withCorsHeaders({
                     status: 404,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'Reference not found' })
-                };
+                });
             }
             
             // 2. Find PDF file in the reference's files array
@@ -84,11 +98,11 @@ app.http('KBSplitPDF', {
             );
             
             if (!pdfFile) {
-                return {
+                return withCorsHeaders({
                     status: 400,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'No PDF file found in this reference' })
-                };
+                });
             }
             
             // Extract blob name from URL or use stored blobName
@@ -115,11 +129,11 @@ app.http('KBSplitPDF', {
                 context.log(`[KB Split PDF] Downloaded ${pdfBuffer.length} bytes`);
             } catch (downloadError) {
                 context.error('[KB Split PDF] Download failed:', downloadError.message);
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'Failed to download PDF', details: downloadError.message })
-                };
+                });
             }
             
             // 4. Load PDF with pdf-lib and get page count
@@ -249,7 +263,7 @@ app.http('KBSplitPDF', {
                 ttl: JOB_TTL_SECONDS
             });
             
-            return {
+            return withCorsHeaders({
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -261,15 +275,15 @@ app.http('KBSplitPDF', {
                     pages: processedPages,
                     newStatus: 1
                 })
-            };
+            });
             
         } catch (error) {
             context.error('[KB Split PDF] Error:', error);
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to split PDF', details: error.message })
-            };
+            });
         }
     }
 });
@@ -472,39 +486,39 @@ app.http('KBOCRPages', {
         }
 
         if (!endpointBaseUrl || !endpointBaseUrl.trim()) {
-            return {
+            return withCorsHeaders({
                 status: 400,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'endpointBaseUrl is required' })
-            };
+            });
         }
 
         const ocrUrl = buildOcrUrl(endpointBaseUrl);
         if (!ocrUrl) {
-            return {
+            return withCorsHeaders({
                 status: 400,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Invalid endpointBaseUrl' })
-            };
+            });
         }
 
         const validation = validateOcrUrl(ocrUrl);
         if (!validation.ok) {
-            return {
+            return withCorsHeaders({
                 status: 400,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: validation.error })
-            };
+            });
         }
 
         try {
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
-                return {
+                return withCorsHeaders({
                     status: 404,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'Reference not found' })
-                };
+                });
             }
 
             const pages = await queryItems(CONTAINER_PAGES, {
@@ -513,11 +527,11 @@ app.http('KBOCRPages', {
             });
 
             if (!pages || pages.length === 0) {
-                return {
+                return withCorsHeaders({
                     status: 400,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'No split pages found for this reference. Run Step 1 first.' })
-                };
+                });
             }
 
             totalPages = pages.length;
@@ -704,7 +718,7 @@ app.http('KBOCRPages', {
                 ttl: JOB_TTL_SECONDS
             });
 
-            return {
+            return withCorsHeaders({
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -718,7 +732,7 @@ app.http('KBOCRPages', {
                     pagesFailed,
                     newStatus
                 })
-            };
+            });
 
         } catch (error) {
             context.error('[KB OCR] Error:', error);
@@ -734,11 +748,11 @@ app.http('KBOCRPages', {
                     ttl: JOB_TTL_SECONDS
                 });
             }
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to OCR pages', details: error.message })
-            };
+            });
         }
     }
 });
@@ -755,14 +769,14 @@ app.http('KBJobStatus', {
             const job = await getItem(CONTAINER_JOBS, jobId, jobId);
             
             if (!job) {
-                return {
+                return withCorsHeaders({
                     status: 404,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'Job not found' })
-                };
+                });
             }
             
-            return {
+            return withCorsHeaders({
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -781,14 +795,14 @@ app.http('KBJobStatus', {
                     completedAt: job.completedAt,
                     error: job.error
                 })
-            };
+            });
         } catch (error) {
             context.error('[KB Job Status] Error:', error);
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to get job status', details: error.message })
-            };
+            });
         }
     }
 });
@@ -848,19 +862,19 @@ app.http('KBVectorizePages', {
         const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
         if (!VECTOR_STORE_ID) {
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'OPENAI_VECTOR_STORE environment variable not configured' })
-            };
+            });
         }
 
         if (!OPENAI_API_KEY) {
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'OPENAI_API_KEY environment variable not configured' })
-            };
+            });
         }
 
         let requestedJobId = null;
@@ -885,11 +899,11 @@ app.http('KBVectorizePages', {
             // Fetch the reference
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
-                return {
+                return withCorsHeaders({
                     status: 404,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'Reference not found' })
-                };
+                });
             }
 
             // Query pages with ocrStatus=1 and no openaiVector yet
@@ -915,16 +929,16 @@ app.http('KBVectorizePages', {
                 });
 
                 if (!allPages || allPages.length === 0) {
-                    return {
+                    return withCorsHeaders({
                         status: 400,
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.' })
-                    };
+                    });
                 }
 
                 const alreadyVectorized = allPages.filter(p => p.openaiVector && p.openaiVector.fileId);
                 if (alreadyVectorized.length === allPages.length) {
-                    return {
+                    return withCorsHeaders({
                         status: 200,
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -934,19 +948,19 @@ app.http('KBVectorizePages', {
                             totalPages: allPages.length,
                             pagesVectorized: alreadyVectorized.length
                         })
-                    };
+                    });
                 }
 
                 const pendingOcr = allPages.filter(p => p.ocrStatus !== 1);
                 if (pendingOcr.length > 0) {
-                    return {
+                    return withCorsHeaders({
                         status: 400,
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ 
                             error: 'Some pages have not completed OCR yet. Run Step 2 first.',
                             pendingOcrCount: pendingOcr.length
                         })
-                    };
+                    });
                 }
             }
 
@@ -1153,7 +1167,7 @@ app.http('KBVectorizePages', {
 
             context.log(`[KB Vectorize] Completed! ${pagesSucceeded}/${totalPages} pages vectorized`);
 
-            return {
+            return withCorsHeaders({
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -1166,7 +1180,7 @@ app.http('KBVectorizePages', {
                     pagesFailed,
                     newStatus
                 })
-            };
+            });
 
         } catch (error) {
             context.error('[KB Vectorize] Error:', error);
@@ -1182,11 +1196,11 @@ app.http('KBVectorizePages', {
                     ttl: JOB_TTL_SECONDS
                 });
             }
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to vectorize pages', details: error.message })
-            };
+            });
         }
     }
 });
