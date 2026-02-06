@@ -9,7 +9,24 @@ const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
 const CONTAINER_JOBS = process.env.COSMOSDB_CONTAINER_JOBS || 'jobs';
 const BLOB_CONTAINER_UPLOADS = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
 const BLOB_CONTAINER_PAGES = process.env.BLOB_CONTAINER_PAGES || 'pages';
-const JOB_TTL_SECONDS = 300; // Auto-delete job records after 5 minutes
+const JOB_TTL_SECONDS = 7200; // Auto-delete job records after 2 hours
+const OCR_TIMEOUT_MS = Number(process.env.KB_OCR_TIMEOUT_MS || 120000);
+const VECTORIZE_TIMEOUT_MS = Number(process.env.KB_VECTORIZE_TIMEOUT_MS || 180000);
+
+async function withTimeout(promise, timeoutMs, label) {
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+    });
+
+    try {
+        return await Promise.race([promise, timeoutPromise]);
+    } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+    }
+}
 
 // POST /api/kb/split-pdf/{referenceId} - Split PDF into individual single-page PDFs
 app.http('KBSplitPDF', {
@@ -352,7 +369,7 @@ function extractOcrText(payload) {
 
 async function postPdfToOcr(ocrUrl, pdfBuffer, context) {
     const errors = [];
-    const timeoutMs = 120000;
+    const timeoutMs = OCR_TIMEOUT_MS;
 
     try {
         const boundary = `----phdhelper${Date.now()}${Math.random().toString(16).slice(2)}`;
@@ -438,6 +455,10 @@ app.http('KBOCRPages', {
 
         let endpointBaseUrl = '';
         let requestedJobId = null;
+        let jobRecord = null;
+        let pagesSucceeded = 0;
+        let pagesFailed = 0;
+        let totalPages = 0;
 
         try {
             const body = await request.json();
@@ -499,9 +520,9 @@ app.http('KBOCRPages', {
                 };
             }
 
-            const totalPages = pages.length;
+            totalPages = pages.length;
             const jobId = requestedJobId || `job_${referenceId}_ocr_${Date.now()}`;
-            const jobRecord = {
+            jobRecord = {
                 id: jobId,
                 referenceId: referenceId,
                 type: 'ocr-pages',
@@ -510,6 +531,8 @@ app.http('KBOCRPages', {
                 pagesCompleted: 0,
                 pagesFailed: 0,
                 pagesSucceeded: 0,
+                retryTotal: 0,
+                retryCompleted: 0,
                 currentPage: 0,
                 startedAt: new Date().toISOString(),
                 ttl: JOB_TTL_SECONDS
@@ -519,9 +542,79 @@ app.http('KBOCRPages', {
             context.log(`[KB OCR] Created job record: ${jobId}`);
             context.log(`[KB OCR] OCR URL: ${ocrUrl}`);
 
-            let pagesSucceeded = 0;
-            let pagesFailed = 0;
             let pagesProcessed = 0;
+            const retryPages = [];
+
+            const runOcrForPage = async (page, attempt) => {
+                const pageNumber = page.pageNumber;
+                const processingRecord = {
+                    ...page,
+                    ocrStatus: 2,
+                    ocrStartedAt: new Date().toISOString(),
+                    ocrCompletedAt: null,
+                    ocrError: null,
+                    ocrText: null,
+                    ocrAttempt: attempt
+                };
+                await upsertItem(CONTAINER_PAGES, processingRecord);
+
+                try {
+                    const runAttempt = async () => {
+                        const pdfBuffer = await downloadBlob(BLOB_CONTAINER_PAGES, page.blobName);
+                        return await postPdfToOcr(ocrUrl, pdfBuffer, context);
+                    };
+
+                    const ocrRes = await withTimeout(
+                        runAttempt(),
+                        OCR_TIMEOUT_MS,
+                        `OCR page ${pageNumber}`
+                    );
+
+                    if (!ocrRes.ok) {
+                        await upsertItem(CONTAINER_PAGES, {
+                            ...processingRecord,
+                            ocrStatus: -1,
+                            ocrError: ocrRes.error || 'OCR request failed',
+                            ocrText: null,
+                            ocrCompletedAt: new Date().toISOString()
+                        });
+                        return { ok: false };
+                    }
+
+                    const ocrResult = extractOcrText(ocrRes.payload);
+                    const extracted = ocrResult.text || (typeof ocrRes.rawText === 'string' ? ocrRes.rawText.trim() : null);
+
+                    if (!extracted) {
+                        await upsertItem(CONTAINER_PAGES, {
+                            ...processingRecord,
+                            ocrStatus: -1,
+                            ocrError: 'OCR response did not include extractable text',
+                            ocrText: null,
+                            ocrCompletedAt: new Date().toISOString()
+                        });
+                        return { ok: false };
+                    }
+
+                    await upsertItem(CONTAINER_PAGES, {
+                        ...processingRecord,
+                        ocrStatus: 1,
+                        ocrError: null,
+                        ocrText: extracted,
+                        printPublishedPage: ocrResult.printPage || null,
+                        ocrCompletedAt: new Date().toISOString()
+                    });
+                    return { ok: true };
+                } catch (pageError) {
+                    context.error(`[KB OCR] Error processing page ${pageNumber}:`, pageError.message);
+                    await upsertItem(CONTAINER_PAGES, {
+                        ...processingRecord,
+                        ocrStatus: -1,
+                        ocrError: pageError.message,
+                        ocrCompletedAt: new Date().toISOString()
+                    });
+                    return { ok: false };
+                }
+            };
 
             for (const page of pages) {
                 const pageNumber = page.pageNumber;
@@ -530,75 +623,14 @@ app.http('KBOCRPages', {
 
                 if (page.ocrStatus === 1 && typeof page.ocrText === 'string' && page.ocrText.trim()) {
                     pagesSucceeded += 1;
-                    await upsertItem(CONTAINER_JOBS, {
-                        ...jobRecord,
-                        pagesCompleted: pagesProcessed,
-                        pagesSucceeded,
-                        pagesFailed,
-                        currentPage: pageNumber,
-                        lastUpdated: new Date().toISOString()
-                    });
-                    continue;
-                }
-
-                const processingRecord = {
-                    ...page,
-                    ocrStatus: 2,
-                    ocrStartedAt: new Date().toISOString(),
-                    ocrCompletedAt: null,
-                    ocrError: null,
-                    ocrText: null
-                };
-                await upsertItem(CONTAINER_PAGES, processingRecord);
-
-                try {
-                    const pdfBuffer = await downloadBlob(BLOB_CONTAINER_PAGES, page.blobName);
-                    const ocrRes = await postPdfToOcr(ocrUrl, pdfBuffer, context);
-
-                    if (!ocrRes.ok) {
-                        pagesFailed += 1;
-                        await upsertItem(CONTAINER_PAGES, {
-                            ...processingRecord,
-                            ocrStatus: -1,
-                            ocrError: ocrRes.error || 'OCR request failed',
-                            ocrText: null,
-                            ocrCompletedAt: new Date().toISOString()
-                        });
+                } else {
+                    const ocrResult = await runOcrForPage(page, 1);
+                    if (ocrResult.ok) {
+                        pagesSucceeded += 1;
                     } else {
-                        const ocrResult = extractOcrText(ocrRes.payload);
-                        const extracted = ocrResult.text || (typeof ocrRes.rawText === 'string' ? ocrRes.rawText.trim() : null);
-
-                        if (!extracted) {
-                            pagesFailed += 1;
-                            await upsertItem(CONTAINER_PAGES, {
-                                ...processingRecord,
-                                ocrStatus: -1,
-                                ocrError: 'OCR response did not include extractable text',
-                                ocrText: null,
-                                ocrCompletedAt: new Date().toISOString()
-                            });
-                        } else {
-                            pagesSucceeded += 1;
-                            await upsertItem(CONTAINER_PAGES, {
-                                ...processingRecord,
-                                ocrStatus: 1,
-                                ocrError: null,
-                                ocrText: extracted,
-                                printPublishedPage: ocrResult.printPage || null,
-                                ocrCompletedAt: new Date().toISOString()
-                            });
-                        }
+                        pagesFailed += 1;
+                        retryPages.push(page);
                     }
-
-                } catch (pageError) {
-                    pagesFailed += 1;
-                    context.error(`[KB OCR] Error processing page ${pageNumber}:`, pageError.message);
-                    await upsertItem(CONTAINER_PAGES, {
-                        ...processingRecord,
-                        ocrStatus: -1,
-                        ocrError: pageError.message,
-                        ocrCompletedAt: new Date().toISOString()
-                    });
                 }
 
                 await upsertItem(CONTAINER_JOBS, {
@@ -609,6 +641,41 @@ app.http('KBOCRPages', {
                     currentPage: pageNumber,
                     lastUpdated: new Date().toISOString()
                 });
+            }
+
+            if (retryPages.length > 0) {
+                let retryCompleted = 0;
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'retrying',
+                    pagesCompleted: totalPages,
+                    pagesSucceeded,
+                    pagesFailed,
+                    retryTotal: retryPages.length,
+                    retryCompleted: 0,
+                    lastUpdated: new Date().toISOString()
+                });
+
+                for (const page of retryPages) {
+                    retryCompleted += 1;
+                    const retryResult = await runOcrForPage(page, 2);
+                    if (retryResult.ok) {
+                        pagesSucceeded += 1;
+                        pagesFailed = Math.max(0, pagesFailed - 1);
+                    }
+
+                    await upsertItem(CONTAINER_JOBS, {
+                        ...jobRecord,
+                        status: 'retrying',
+                        pagesCompleted: totalPages,
+                        pagesSucceeded,
+                        pagesFailed,
+                        retryTotal: retryPages.length,
+                        retryCompleted,
+                        currentPage: page.pageNumber,
+                        lastUpdated: new Date().toISOString()
+                    });
+                }
             }
 
             const allSucceeded = pagesFailed === 0 && pagesSucceeded === totalPages;
@@ -622,13 +689,18 @@ app.http('KBOCRPages', {
             };
             await upsertItem(CONTAINER_REFERENCES, updatedReference);
 
+            const finalStatus = pagesFailed > 0 ? 'complete_with_errors' : 'complete';
+            const jobError = pagesFailed > 0 ? `${pagesFailed} page(s) failed` : null;
             await upsertItem(CONTAINER_JOBS, {
                 ...jobRecord,
-                status: 'complete',
+                status: finalStatus,
                 pagesCompleted: totalPages,
                 pagesSucceeded,
                 pagesFailed,
+                retryTotal: retryPages.length,
+                retryCompleted: retryPages.length,
                 completedAt: new Date().toISOString(),
+                error: jobError,
                 ttl: JOB_TTL_SECONDS
             });
 
@@ -650,6 +722,18 @@ app.http('KBOCRPages', {
 
         } catch (error) {
             context.error('[KB OCR] Error:', error);
+            if (jobRecord) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    pagesCompleted: pagesSucceeded + pagesFailed,
+                    pagesSucceeded,
+                    pagesFailed,
+                    completedAt: new Date().toISOString(),
+                    error: error.message,
+                    ttl: JOB_TTL_SECONDS
+                });
+            }
             return {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
@@ -691,6 +775,8 @@ app.http('KBJobStatus', {
                     pagesSucceeded: job.pagesSucceeded,
                     currentPage: job.currentPage,
                     progress: job.totalPages > 0 ? Math.round((job.pagesCompleted / job.totalPages) * 100) : 0,
+                    retryTotal: job.retryTotal || 0,
+                    retryCompleted: job.retryCompleted || 0,
                     startedAt: job.startedAt,
                     completedAt: job.completedAt,
                     error: job.error
@@ -787,6 +873,11 @@ app.http('KBVectorizePages', {
             requestedJobId = null;
         }
 
+        let jobRecord = null;
+        let pagesSucceeded = 0;
+        let pagesFailed = 0;
+        let totalPages = 0;
+
         try {
             // Initialize OpenAI client
             const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -806,7 +897,12 @@ app.http('KBVectorizePages', {
                 query: `SELECT * FROM c 
                         WHERE c.referenceId = @referenceId 
                           AND c.ocrStatus = 1 
-                          AND (NOT IS_DEFINED(c.openaiVector) OR c.openaiVector = null OR c.openaiVector.fileId = null)
+                          AND (
+                              NOT IS_DEFINED(c.openaiVector)
+                              OR c.openaiVector = null
+                              OR c.openaiVector.fileId = null
+                              OR (IS_DEFINED(c.openaiVector.status) AND c.openaiVector.status != 'completed')
+                          )
                         ORDER BY c.pageNumber`,
                 parameters: [{ name: '@referenceId', value: referenceId }]
             });
@@ -854,9 +950,9 @@ app.http('KBVectorizePages', {
                 }
             }
 
-            const totalPages = pages.length;
+            totalPages = pages.length;
             const jobId = requestedJobId || `job_${referenceId}_vectorize_${Date.now()}`;
-            const jobRecord = {
+            jobRecord = {
                 id: jobId,
                 referenceId: referenceId,
                 type: 'vectorize-pages',
@@ -865,6 +961,8 @@ app.http('KBVectorizePages', {
                 pagesCompleted: 0,
                 pagesFailed: 0,
                 pagesSucceeded: 0,
+                retryTotal: 0,
+                retryCompleted: 0,
                 currentPage: 0,
                 vectorStoreId: VECTOR_STORE_ID,
                 startedAt: new Date().toISOString(),
@@ -876,30 +974,25 @@ app.http('KBVectorizePages', {
             context.log(`[KB Vectorize] Vector Store ID: ${VECTOR_STORE_ID}`);
             context.log(`[KB Vectorize] Pages to process: ${totalPages}`);
 
-            let pagesSucceeded = 0;
-            let pagesFailed = 0;
             let pagesProcessed = 0;
+            const retryPages = [];
 
-            for (const page of pages) {
+            const runVectorizeForPage = async (page, attempt) => {
                 const pageNumber = page.pageNumber;
-                pagesProcessed += 1;
-                context.log(`[KB Vectorize] Processing page ${pageNumber} (${pagesProcessed}/${totalPages})`);
+                if (page.openaiVector?.status === 'completed') {
+                    return { ok: true };
+                }
 
-                try {
-                    // Build file content and attributes
+                const fileName = `${referenceId}_page_${String(pageNumber).padStart(5, '0')}.txt`;
+
+                const uploadAndIndex = async () => {
                     const fileContent = buildVectorFileContent(page);
                     const attributes = buildVectorAttributes(page);
-                    const fileName = `${referenceId}_page_${String(pageNumber).padStart(5, '0')}.txt`;
-
-                    // Upload file to OpenAI
                     const file = await openai.files.create({
                         file: new File([fileContent], fileName, { type: 'text/plain' }),
                         purpose: 'assistants'
                     });
 
-                    context.log(`[KB Vectorize] File uploaded: ${file.id}`);
-
-                    // Attach to vector store with attributes and chunking strategy
                     const vectorStoreFile = await openai.vectorStores.files.createAndPoll(
                         VECTOR_STORE_ID,
                         {
@@ -915,50 +1008,72 @@ app.http('KBVectorizePages', {
                         }
                     );
 
-                    context.log(`[KB Vectorize] Added to vector store: ${vectorStoreFile.id}, status: ${vectorStoreFile.status}`);
+                    return { file, vectorStoreFile };
+                };
+
+                try {
+                    const { file, vectorStoreFile } = await withTimeout(
+                        uploadAndIndex(),
+                        VECTORIZE_TIMEOUT_MS,
+                        `Vectorize page ${pageNumber}`
+                    );
 
                     if (vectorStoreFile.status === 'completed') {
-                        pagesSucceeded += 1;
-                        
-                        // Update Cosmos page record with vector store linkage
                         await upsertItem(CONTAINER_PAGES, {
                             ...page,
                             openaiVector: {
                                 vectorStoreId: VECTOR_STORE_ID,
                                 fileId: file.id,
                                 vectorStoreFileId: vectorStoreFile.id,
+                                status: 'completed',
+                                attempt,
                                 uploadedAt: new Date().toISOString()
                             }
                         });
-                    } else {
-                        pagesFailed += 1;
-                        context.error(`[KB Vectorize] Vector store file status: ${vectorStoreFile.status}`);
-                        
-                        await upsertItem(CONTAINER_PAGES, {
-                            ...page,
-                            openaiVector: {
-                                vectorStoreId: VECTOR_STORE_ID,
-                                fileId: file.id,
-                                vectorStoreFileId: vectorStoreFile.id,
-                                status: vectorStoreFile.status,
-                                error: vectorStoreFile.last_error?.message || 'Failed to index',
-                                uploadedAt: new Date().toISOString()
-                            }
-                        });
+                        return { ok: true };
                     }
 
-                } catch (pageError) {
-                    pagesFailed += 1;
-                    context.error(`[KB Vectorize] Error processing page ${pageNumber}:`, pageError.message);
-                    
                     await upsertItem(CONTAINER_PAGES, {
                         ...page,
                         openaiVector: {
                             vectorStoreId: VECTOR_STORE_ID,
+                            fileId: file.id,
+                            vectorStoreFileId: vectorStoreFile.id,
+                            status: vectorStoreFile.status || 'failed',
+                            attempt,
+                            error: vectorStoreFile.last_error?.message || 'Failed to index',
+                            uploadedAt: new Date().toISOString()
+                        }
+                    });
+                    return { ok: false };
+                } catch (pageError) {
+                    context.error(`[KB Vectorize] Error processing page ${pageNumber}:`, pageError.message);
+
+                    await upsertItem(CONTAINER_PAGES, {
+                        ...page,
+                        openaiVector: {
+                            vectorStoreId: VECTOR_STORE_ID,
+                            status: 'failed',
+                            attempt,
                             error: pageError.message,
                             failedAt: new Date().toISOString()
                         }
                     });
+                    return { ok: false };
+                }
+            };
+
+            for (const page of pages) {
+                const pageNumber = page.pageNumber;
+                pagesProcessed += 1;
+                context.log(`[KB Vectorize] Processing page ${pageNumber} (${pagesProcessed}/${totalPages})`);
+
+                const vectorizeResult = await runVectorizeForPage(page, 1);
+                if (vectorizeResult.ok) {
+                    pagesSucceeded += 1;
+                } else {
+                    pagesFailed += 1;
+                    retryPages.push(page);
                 }
 
                 // Update job progress
@@ -970,6 +1085,41 @@ app.http('KBVectorizePages', {
                     currentPage: pageNumber,
                     lastUpdated: new Date().toISOString()
                 });
+            }
+
+            if (retryPages.length > 0) {
+                let retryCompleted = 0;
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'retrying',
+                    pagesCompleted: totalPages,
+                    pagesSucceeded,
+                    pagesFailed,
+                    retryTotal: retryPages.length,
+                    retryCompleted: 0,
+                    lastUpdated: new Date().toISOString()
+                });
+
+                for (const page of retryPages) {
+                    retryCompleted += 1;
+                    const retryResult = await runVectorizeForPage(page, 2);
+                    if (retryResult.ok) {
+                        pagesSucceeded += 1;
+                        pagesFailed = Math.max(0, pagesFailed - 1);
+                    }
+
+                    await upsertItem(CONTAINER_JOBS, {
+                        ...jobRecord,
+                        status: 'retrying',
+                        pagesCompleted: totalPages,
+                        pagesSucceeded,
+                        pagesFailed,
+                        retryTotal: retryPages.length,
+                        retryCompleted,
+                        currentPage: page.pageNumber,
+                        lastUpdated: new Date().toISOString()
+                    });
+                }
             }
 
             // Update reference status
@@ -985,14 +1135,19 @@ app.http('KBVectorizePages', {
             };
             await upsertItem(CONTAINER_REFERENCES, updatedReference);
 
-            // Mark job complete
+            // Mark job complete (with error status if any pages failed)
+            const finalStatus = pagesFailed > 0 ? 'complete_with_errors' : 'complete';
+            const jobError = pagesFailed > 0 ? `${pagesFailed} page(s) failed` : null;
             await upsertItem(CONTAINER_JOBS, {
                 ...jobRecord,
-                status: 'complete',
+                status: finalStatus,
                 pagesCompleted: totalPages,
                 pagesSucceeded,
                 pagesFailed,
+                retryTotal: retryPages.length,
+                retryCompleted: retryPages.length,
                 completedAt: new Date().toISOString(),
+                error: jobError,
                 ttl: JOB_TTL_SECONDS
             });
 
@@ -1015,6 +1170,18 @@ app.http('KBVectorizePages', {
 
         } catch (error) {
             context.error('[KB Vectorize] Error:', error);
+            if (jobRecord) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    pagesCompleted: pagesSucceeded + pagesFailed,
+                    pagesSucceeded,
+                    pagesFailed,
+                    completedAt: new Date().toISOString(),
+                    error: error.message,
+                    ttl: JOB_TTL_SECONDS
+                });
+            }
             return {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
