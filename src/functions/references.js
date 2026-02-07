@@ -19,23 +19,37 @@ const normalizeSortKey = (value) => {
 };
 
 const extractPrimaryAuthorToken = (reference) => {
-    let s = (reference?.authors || reference?.author || '').toString();
-    if (!s) s = (reference?.apa7 || '').toString();
-    s = s.replace(/^[^A-Za-z0-9]+/g, '').trim();
+    // Prioritize the explicit authors/author field
+    let s = (reference?.authors || reference?.author || '').toString().trim();
+    
+    // If no authors field, try to extract from apa7 citation (format: "Author. (Year). Title...")
+    if (!s) {
+        const apa7 = (reference?.apa7 || '').toString();
+        // Match author pattern at the start: everything before the year in parens
+        const match = apa7.match(/^([^.]+\.\s+)?\(/);
+        if (match) {
+            s = apa7.slice(0, match.index).trim();
+        }
+    }
+    
+    if (!s) return '';
 
-    // If this is APA7-like, authors appear before the year in parentheses.
-    s = s.split('(')[0].trim();
+    // Remove leading non-alphabetic characters
+    s = s.replace(/^[^A-Za-z]+/g, '').trim();
 
-    // Remove common separators for multiple authors (keep the first author/organization)
-    s = s.split('&')[0].trim();
-
-    // If formatted as "Surname, Initials", take surname
+    // For "Surname, Initials & Surname, Initials" format - keep first author only
+    // Split on & first to get just the first author
+    s = s.split(/\s+&\s+/)[0].trim();
+    
+    // Split on comma to get just the surname (handles "Surname, A." format)
     const commaIdx = s.indexOf(',');
     if (commaIdx > 0) {
         s = s.slice(0, commaIdx).trim();
     }
 
+    // Clean up any remaining punctuation
     s = s.replace(/[.\s]+$/g, '').trim();
+    
     return s;
 };
 
