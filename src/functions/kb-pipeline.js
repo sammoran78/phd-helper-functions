@@ -574,6 +574,9 @@ app.http('KBOCRPages', {
 
             totalPages = pages.length;
             
+            // Update jobRecord with actual totalPages so subsequent updates include correct count
+            jobRecord.totalPages = totalPages;
+            
             // Update job record with actual page count and set to processing
             await upsertItem(CONTAINER_JOBS, {
                 ...jobRecord,
@@ -1042,6 +1045,9 @@ app.http('KBVectorizePages', {
             }
 
             totalPages = pages.length;
+            
+            // Update jobRecord with actual totalPages so subsequent updates include correct count
+            jobRecord.totalPages = totalPages;
             
             // Update job record with actual page count and set to processing
             await upsertItem(CONTAINER_JOBS, {
