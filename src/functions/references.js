@@ -54,8 +54,12 @@ const extractPrimaryAuthorToken = (reference) => {
 };
 
 const getBibliographySortKey = (reference) => {
-    const authorToken = extractPrimaryAuthorToken(reference);
-    const authorKey = normalizeSortKey(authorToken);
+    // Sort by the full APA7 citation text character-by-character
+    const apa7Key = normalizeSortKey(reference?.apa7);
+    if (apa7Key) return apa7Key;
+
+    // Fallback: sort by authors then title
+    const authorKey = normalizeSortKey(reference?.authors || reference?.author);
     if (authorKey) return authorKey;
 
     const titleKey = normalizeSortKey(reference?.title);
