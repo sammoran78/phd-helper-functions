@@ -511,13 +511,45 @@ app.http('KBOCRPages', {
             });
         }
 
+        // Create job record IMMEDIATELY so frontend can poll
+        const jobId = requestedJobId || `job_${referenceId}_ocr_${Date.now()}`;
+        jobRecord = {
+            id: jobId,
+            referenceId: referenceId,
+            type: 'ocr-pages',
+            status: 'initializing',
+            totalPages: 0,
+            pagesCompleted: 0,
+            pagesFailed: 0,
+            pagesSucceeded: 0,
+            retryTotal: 0,
+            retryCompleted: 0,
+            currentPage: 0,
+            startedAt: new Date().toISOString(),
+            ttl: JOB_TTL_SECONDS
+        };
+
+        try {
+            await createItem(CONTAINER_JOBS, jobRecord);
+            context.log(`[KB OCR] Created job record: ${jobId}`);
+        } catch (createError) {
+            context.error('[KB OCR] Failed to create job record:', createError);
+            // Continue anyway - polling might fail but processing will still happen
+        }
+
         try {
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'Reference not found',
+                    completedAt: new Date().toISOString()
+                });
                 return withCorsHeaders({
                     status: 404,
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ error: 'Reference not found' })
+                    body: JSON.stringify({ error: 'Reference not found', jobId })
                 });
             }
 
@@ -527,34 +559,29 @@ app.http('KBOCRPages', {
             });
 
             if (!pages || pages.length === 0) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'No split pages found for this reference. Run Step 1 first.',
+                    completedAt: new Date().toISOString()
+                });
                 return withCorsHeaders({
                     status: 400,
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ error: 'No split pages found for this reference. Run Step 1 first.' })
+                    body: JSON.stringify({ error: 'No split pages found for this reference. Run Step 1 first.', jobId })
                 });
             }
 
             totalPages = pages.length;
-            const jobId = requestedJobId || `job_${referenceId}_ocr_${Date.now()}`;
-            jobRecord = {
-                id: jobId,
-                referenceId: referenceId,
-                type: 'ocr-pages',
+            
+            // Update job record with actual page count and set to processing
+            await upsertItem(CONTAINER_JOBS, {
+                ...jobRecord,
                 status: 'processing',
-                totalPages: totalPages,
-                pagesCompleted: 0,
-                pagesFailed: 0,
-                pagesSucceeded: 0,
-                retryTotal: 0,
-                retryCompleted: 0,
-                currentPage: 0,
-                startedAt: new Date().toISOString(),
-                ttl: JOB_TTL_SECONDS
-            };
-
-            await createItem(CONTAINER_JOBS, jobRecord);
-            context.log(`[KB OCR] Created job record: ${jobId}`);
+                totalPages: totalPages
+            });
             context.log(`[KB OCR] OCR URL: ${ocrUrl}`);
+            context.log(`[KB OCR] Pages to process: ${totalPages}`);
 
             let pagesProcessed = 0;
             const retryPages = [];
@@ -896,13 +923,40 @@ app.http('KBVectorizePages', {
             // Initialize OpenAI client
             const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
+            // Create job record IMMEDIATELY so frontend can poll
+            const jobId = requestedJobId || `job_${referenceId}_vectorize_${Date.now()}`;
+            jobRecord = {
+                id: jobId,
+                referenceId: referenceId,
+                type: 'vectorize-pages',
+                status: 'initializing',
+                totalPages: 0,
+                pagesCompleted: 0,
+                pagesFailed: 0,
+                pagesSucceeded: 0,
+                retryTotal: 0,
+                retryCompleted: 0,
+                currentPage: 0,
+                vectorStoreId: VECTOR_STORE_ID,
+                startedAt: new Date().toISOString(),
+                ttl: JOB_TTL_SECONDS
+            };
+            await createItem(CONTAINER_JOBS, jobRecord);
+            context.log(`[KB Vectorize] Created job record: ${jobId}`);
+
             // Fetch the reference
             const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
             if (!reference) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'Reference not found',
+                    completedAt: new Date().toISOString()
+                });
                 return withCorsHeaders({
                     status: 404,
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ error: 'Reference not found' })
+                    body: JSON.stringify({ error: 'Reference not found', jobId })
                 });
             }
 
@@ -929,15 +983,30 @@ app.http('KBVectorizePages', {
                 });
 
                 if (!allPages || allPages.length === 0) {
+                    await upsertItem(CONTAINER_JOBS, {
+                        ...jobRecord,
+                        status: 'error',
+                        error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.',
+                        completedAt: new Date().toISOString()
+                    });
                     return withCorsHeaders({
                         status: 400,
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.' })
+                        body: JSON.stringify({ error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.', jobId })
                     });
                 }
 
                 const alreadyVectorized = allPages.filter(p => p.openaiVector && p.openaiVector.fileId);
                 if (alreadyVectorized.length === allPages.length) {
+                    await upsertItem(CONTAINER_JOBS, {
+                        ...jobRecord,
+                        status: 'complete',
+                        totalPages: allPages.length,
+                        pagesCompleted: allPages.length,
+                        pagesSucceeded: allPages.length,
+                        pagesFailed: 0,
+                        completedAt: new Date().toISOString()
+                    });
                     return withCorsHeaders({
                         status: 200,
                         headers: { 'Content-Type': 'application/json' },
@@ -946,45 +1015,40 @@ app.http('KBVectorizePages', {
                             message: 'All pages already vectorized',
                             referenceId,
                             totalPages: allPages.length,
-                            pagesVectorized: alreadyVectorized.length
+                            pagesVectorized: alreadyVectorized.length,
+                            jobId
                         })
                     });
                 }
 
                 const pendingOcr = allPages.filter(p => p.ocrStatus !== 1);
                 if (pendingOcr.length > 0) {
+                    await upsertItem(CONTAINER_JOBS, {
+                        ...jobRecord,
+                        status: 'error',
+                        error: 'Some pages have not completed OCR yet. Run Step 2 first.',
+                        completedAt: new Date().toISOString()
+                    });
                     return withCorsHeaders({
                         status: 400,
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ 
                             error: 'Some pages have not completed OCR yet. Run Step 2 first.',
-                            pendingOcrCount: pendingOcr.length
+                            pendingOcrCount: pendingOcr.length,
+                            jobId
                         })
                     });
                 }
             }
 
             totalPages = pages.length;
-            const jobId = requestedJobId || `job_${referenceId}_vectorize_${Date.now()}`;
-            jobRecord = {
-                id: jobId,
-                referenceId: referenceId,
-                type: 'vectorize-pages',
+            
+            // Update job record with actual page count and set to processing
+            await upsertItem(CONTAINER_JOBS, {
+                ...jobRecord,
                 status: 'processing',
-                totalPages: totalPages,
-                pagesCompleted: 0,
-                pagesFailed: 0,
-                pagesSucceeded: 0,
-                retryTotal: 0,
-                retryCompleted: 0,
-                currentPage: 0,
-                vectorStoreId: VECTOR_STORE_ID,
-                startedAt: new Date().toISOString(),
-                ttl: JOB_TTL_SECONDS
-            };
-
-            await createItem(CONTAINER_JOBS, jobRecord);
-            context.log(`[KB Vectorize] Created job record: ${jobId}`);
+                totalPages: totalPages
+            });
             context.log(`[KB Vectorize] Vector Store ID: ${VECTOR_STORE_ID}`);
             context.log(`[KB Vectorize] Pages to process: ${totalPages}`);
 
