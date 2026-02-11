@@ -13,3 +13,4 @@ require('./functions/chats');
 require('./functions/auth');
 require('./functions/doi');
 require('./functions/journal');
+require('./functions/system-prompt');
