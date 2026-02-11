@@ -2,6 +2,7 @@ const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
+const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
 
 // GET /api/chats - Get all chat conversations
 app.http('GetChats', {
@@ -13,7 +14,8 @@ app.http('GetChats', {
             context.log('Loading chat conversations from CosmosDB');
             
             const querySpec = {
-                query: 'SELECT c.id, c.title, c.createdAt, c.updatedAt, c.messageCount FROM c ORDER BY c.updatedAt DESC'
+                query: 'SELECT c.id, c.title, c.createdAt, c.updatedAt, c.messageCount FROM c WHERE c.id != @promptId ORDER BY c.updatedAt DESC',
+                parameters: [{ name: '@promptId', value: SYSTEM_PROMPT_DOC_ID }]
             };
             
             const chats = await queryItems(CONTAINER_NAME, querySpec);
@@ -83,6 +85,7 @@ app.http('CreateChat', {
             
             const newChat = {
                 id: `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                type: 'chat',
                 title: body.title || 'New Conversation',
                 messages: body.messages || [],
                 messageCount: body.messages?.length || 0,
@@ -133,6 +136,7 @@ app.http('UpdateChat', {
                 ...existing,
                 ...body,
                 id: id,
+                type: existing.type || body.type || 'chat',
                 messageCount: body.messages?.length || existing.messageCount || 0,
                 updatedAt: new Date().toISOString()
             };
@@ -188,6 +192,7 @@ app.http('AddChatMessage', {
             
             const updatedChat = {
                 ...existing,
+                type: existing.type || 'chat',
                 messages: messages,
                 messageCount: messages.length,
                 updatedAt: new Date().toISOString()

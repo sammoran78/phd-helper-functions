@@ -4,6 +4,8 @@ const { getItem, queryItems } = require('../../shared/cosmosClient');
 
 const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const CONTAINER_CHATS = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
+const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
 
 // POST /api/ai/chat - Generic OpenAI chat completion
 app.http('AIChat', {
@@ -110,6 +112,20 @@ function buildApa7Fallback(reference) {
     return citation;
 }
 
+async function getSystemPrompt(context) {
+    if (!SYSTEM_PROMPT_DOC_ID) return '';
+    try {
+        const doc = await getItem(CONTAINER_CHATS, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
+        const raw = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
+        return (raw || '').toString().trim();
+    } catch (err) {
+        if (context?.warn) {
+            context.warn('[KB RAG] Failed to load system prompt', err?.message || String(err));
+        }
+        return '';
+    }
+}
+
 async function lookupCitationByFileId(fileId) {
     if (!fileId) return null;
 
@@ -159,6 +175,9 @@ app.http('KBRagChat', {
             const body = await request.json();
             const query = (body?.query || body?.message || '').toString().trim();
             const chatId = (body?.chatId || '').toString().trim();
+            const useReasoning = Boolean(body?.reasoning);
+            const reasoningEffort = (process.env.OPENAI_REASONING_EFFORT || '').toString().trim();
+            const systemPrompt = await getSystemPrompt(context);
 
             if (!query) {
                 return {
@@ -197,7 +216,7 @@ app.http('KBRagChat', {
 
             let historyText = '';
             if (chatId) {
-                const chat = await getItem(process.env.COSMOSDB_CONTAINER_CHATS || 'chats', chatId, chatId);
+                const chat = await getItem(CONTAINER_CHATS, chatId, chatId);
                 if (chat && Array.isArray(chat.messages) && chat.messages.length > 0) {
                     const recent = chat.messages.slice(-12);
                     historyText = recent
@@ -207,6 +226,7 @@ app.http('KBRagChat', {
             }
 
             const input = [
+                systemPrompt,
                 'You are a research assistant. Answer using ONLY the provided file search results from the user\'s academic corpus.',
                 'When you make a claim that is supported by a source, append a citation marker in the exact form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id for that source.',
                 'Keep answers concise but academically rigorous.',
@@ -229,10 +249,24 @@ app.http('KBRagChat', {
             try {
                 response = await openai.responses.create({
                     ...basePayload,
-                    include: ['file_search_call.results']
+                    include: ['file_search_call.results'],
+                    ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
                 });
             } catch (err) {
-                response = await openai.responses.create(basePayload);
+                const msg = (err && err.message) ? err.message : String(err);
+                if (useReasoning && reasoningEffort) {
+                    context.warn('[KB RAG Chat] reasoning_effort rejected; retrying without it. Error:', msg);
+                    try {
+                        response = await openai.responses.create({
+                            ...basePayload,
+                            include: ['file_search_call.results']
+                        });
+                    } catch (retryErr) {
+                        response = await openai.responses.create(basePayload);
+                    }
+                } else {
+                    response = await openai.responses.create(basePayload);
+                }
             }
 
             const content = getOutputText(response);
@@ -284,6 +318,9 @@ app.http('KBRagChatStream', {
             const body = await request.json();
             const query = (body?.query || body?.message || '').toString().trim();
             const chatId = (body?.chatId || '').toString().trim();
+            const useReasoning = Boolean(body?.reasoning);
+            const reasoningEffort = (process.env.OPENAI_REASONING_EFFORT || '').toString().trim();
+            const systemPrompt = await getSystemPrompt(context);
 
             if (!query) {
                 return {
@@ -323,7 +360,7 @@ app.http('KBRagChatStream', {
 
             let historyText = '';
             if (chatId) {
-                const chat = await getItem(process.env.COSMOSDB_CONTAINER_CHATS || 'chats', chatId, chatId);
+                const chat = await getItem(CONTAINER_CHATS, chatId, chatId);
                 if (chat && Array.isArray(chat.messages) && chat.messages.length > 0) {
                     const recent = chat.messages.slice(-12);
                     historyText = recent
@@ -333,6 +370,7 @@ app.http('KBRagChatStream', {
             }
 
             const input = [
+                systemPrompt,
                 'You are a research assistant. Answer using ONLY the provided file search results from the user\'s academic corpus.',
                 'When you make a claim that is supported by a source, append a citation marker in the exact form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id for that source.',
                 'Keep answers concise but academically rigorous.',
@@ -371,7 +409,22 @@ app.http('KBRagChatStream', {
                     (async () => {
                         let fullText = '';
                         try {
-                            const openaiStream = await openai.responses.create({ ...basePayload, stream: true });
+                            let openaiStream;
+                            try {
+                                openaiStream = await openai.responses.create({
+                                    ...basePayload,
+                                    stream: true,
+                                    ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+                                });
+                            } catch (err) {
+                                const msg = (err && err.message) ? err.message : String(err);
+                                if (useReasoning && reasoningEffort) {
+                                    context.warn('[KB RAG Stream] reasoning_effort rejected; retrying without it. Error:', msg);
+                                    openaiStream = await openai.responses.create({ ...basePayload, stream: true });
+                                } else {
+                                    throw err;
+                                }
+                            }
 
                             for await (const event of openaiStream) {
                                 if (event?.type === 'response.output_text.delta' && typeof event?.delta === 'string') {
