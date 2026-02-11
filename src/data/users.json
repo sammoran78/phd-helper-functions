@@ -6,9 +6,20 @@
     "role": "candidate"
   },
   {
+    "email": "samuel.moran@students.mq.edu.au",
+    "password": "cinTih-tiskyz-xymtu8",
+    "name": "Sam Moran",
+    "role": "candidate"
+  },  
+  {
     "email": "jon.burtt@mq.edu.au",
     "password": "sammoran2028",
     "name": "Jon Burtt",
     "role": "supervisor"
+  },  {
+    "email": "hsuming.teo@mq.edu.au",
+    "password": "2028sammoranphd",
+    "name": "Hsu-Ming Teo",
+    "role": "assoc. supervisor"
   }
 ]
