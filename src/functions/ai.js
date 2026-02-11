@@ -124,7 +124,7 @@ async function getSystemPrompt(context) {
             doc = Array.isArray(matches) ? matches[0] : null;
         }
         const raw = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
-        return (raw || '').toString().trim();
+        return (raw || '').toString().replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
     } catch (err) {
         if (context?.warn) {
             context.warn('[KB RAG] Failed to load system prompt', err?.message || String(err));
