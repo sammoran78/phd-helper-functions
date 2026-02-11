@@ -115,7 +115,14 @@ function buildApa7Fallback(reference) {
 async function getSystemPrompt(context) {
     if (!SYSTEM_PROMPT_DOC_ID) return '';
     try {
-        const doc = await getItem(CONTAINER_CHATS, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
+        let doc = await getItem(CONTAINER_CHATS, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
+        if (!doc) {
+            const matches = await queryItems(CONTAINER_CHATS, {
+                query: 'SELECT TOP 1 * FROM c WHERE c.id = @id',
+                parameters: [{ name: '@id', value: SYSTEM_PROMPT_DOC_ID }]
+            });
+            doc = Array.isArray(matches) ? matches[0] : null;
+        }
         const raw = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
         return (raw || '').toString().trim();
     } catch (err) {

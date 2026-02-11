@@ -1,5 +1,5 @@
 const { app } = require('@azure/functions');
-const { getItem, upsertItem } = require('../../shared/cosmosClient');
+const { getItem, upsertItem, queryItems } = require('../../shared/cosmosClient');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
 const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
@@ -11,7 +11,14 @@ app.http('GetSystemPrompt', {
     route: 'kb/system-prompt',
     handler: async (request, context) => {
         try {
-            const doc = await getItem(CONTAINER_NAME, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
+            let doc = await getItem(CONTAINER_NAME, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
+            if (!doc) {
+                const matches = await queryItems(CONTAINER_NAME, {
+                    query: 'SELECT TOP 1 * FROM c WHERE c.id = @id',
+                    parameters: [{ name: '@id', value: SYSTEM_PROMPT_DOC_ID }]
+                });
+                doc = Array.isArray(matches) ? matches[0] : null;
+            }
             const content = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
 
             return {
