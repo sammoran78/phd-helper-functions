@@ -502,8 +502,8 @@ app.http('GetDashboardAnalytics', {
                     status: 200,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        newArticles: { current: 0, weekChange: 0 },
-                        sourcesParsed: { current: 0, weekChange: 0 },
+                        knowledgeBase: { current: 0, weekChange: 0 },
+                        sourcesForReview: { current: 0, weekChange: 0 },
                         wordCount: { current: 0, weekChange: 0, target: 80000 },
                         daysToMilestone: { current: 0, milestoneName: 'No milestone set' },
                         surveyResponses: { current: 0, weekChange: 0 },
@@ -513,9 +513,9 @@ app.http('GetDashboardAnalytics', {
                 };
             }
             
-            // Calculate if data is stale (older than 24 hours)
+            // Calculate if data is stale (older than 12 hours)
             const lastUpdated = snapshot.lastUpdated ? new Date(snapshot.lastUpdated) : null;
-            const isStale = !lastUpdated || (Date.now() - lastUpdated.getTime() > 24 * 60 * 60 * 1000);
+            const isStale = !lastUpdated || (Date.now() - lastUpdated.getTime() > 12 * 60 * 60 * 1000);
             
             // Calculate weekly changes from history
             const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
@@ -524,13 +524,13 @@ app.http('GetDashboardAnalytics', {
             const weekAgoEntry = history.find(h => new Date(h.timestamp).getTime() <= oneWeekAgo) || history[history.length - 1];
             
             const response = {
-                newArticles: {
-                    current: snapshot.newArticles || 0,
-                    weekChange: weekAgoEntry ? (snapshot.newArticles || 0) - (weekAgoEntry.newArticles || 0) : 0
+                knowledgeBase: {
+                    current: snapshot.knowledgeBase || 0,
+                    weekChange: weekAgoEntry ? (snapshot.knowledgeBase || 0) - (weekAgoEntry.knowledgeBase || 0) : 0
                 },
-                sourcesParsed: {
-                    current: snapshot.sourcesParsed || 0,
-                    weekChange: weekAgoEntry ? (snapshot.sourcesParsed || 0) - (weekAgoEntry.sourcesParsed || 0) : 0
+                sourcesForReview: {
+                    current: snapshot.sourcesForReview || 0,
+                    weekChange: weekAgoEntry ? (snapshot.sourcesForReview || 0) - (weekAgoEntry.sourcesForReview || 0) : 0
                 },
                 wordCount: {
                     current: snapshot.wordCount || 0,
@@ -573,7 +573,7 @@ app.http('UpdateDashboardAnalytics', {
     handler: async (request, context) => {
         try {
             const body = await request.json();
-            const { newArticles, sourcesParsed, wordCount, daysToMilestone, milestoneName, surveyResponses, wordCountTarget } = body;
+            const { knowledgeBase, sourcesForReview, wordCount, daysToMilestone, milestoneName, surveyResponses, wordCountTarget } = body;
             
             // Get existing snapshot or create new
             let snapshot = await getItem(CONTAINER_NAME, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID);
@@ -589,8 +589,8 @@ app.http('UpdateDashboardAnalytics', {
             const now = new Date().toISOString();
             const historyEntry = {
                 timestamp: now,
-                newArticles: snapshot.newArticles,
-                sourcesParsed: snapshot.sourcesParsed,
+                knowledgeBase: snapshot.knowledgeBase,
+                sourcesForReview: snapshot.sourcesForReview,
                 wordCount: snapshot.wordCount,
                 surveyResponses: snapshot.surveyResponses
             };
@@ -599,17 +599,17 @@ app.http('UpdateDashboardAnalytics', {
             const lastHistoryEntry = snapshot.history?.[0];
             const shouldAddHistory = !lastHistoryEntry || 
                 (Date.now() - new Date(lastHistoryEntry.timestamp).getTime() > 60 * 60 * 1000) ||
-                lastHistoryEntry.newArticles !== snapshot.newArticles ||
-                lastHistoryEntry.sourcesParsed !== snapshot.sourcesParsed ||
+                lastHistoryEntry.knowledgeBase !== snapshot.knowledgeBase ||
+                lastHistoryEntry.sourcesForReview !== snapshot.sourcesForReview ||
                 lastHistoryEntry.wordCount !== snapshot.wordCount;
             
-            if (shouldAddHistory && snapshot.sourcesParsed !== undefined) {
+            if (shouldAddHistory && (snapshot.knowledgeBase !== undefined || snapshot.sourcesForReview !== undefined)) {
                 snapshot.history = [historyEntry, ...(snapshot.history || [])].slice(0, 90);
             }
             
             // Update current values
-            if (newArticles !== undefined) snapshot.newArticles = newArticles;
-            if (sourcesParsed !== undefined) snapshot.sourcesParsed = sourcesParsed;
+            if (knowledgeBase !== undefined) snapshot.knowledgeBase = knowledgeBase;
+            if (sourcesForReview !== undefined) snapshot.sourcesForReview = sourcesForReview;
             if (wordCount !== undefined) snapshot.wordCount = wordCount;
             if (daysToMilestone !== undefined) snapshot.daysToMilestone = daysToMilestone;
             if (milestoneName !== undefined) snapshot.milestoneName = milestoneName;
@@ -648,22 +648,25 @@ app.http('RefreshDashboardAnalytics', {
         try {
             // Fetch counts from various sources
 
-            // 0. Count shortlisted reading articles (New Articles)
-            let newArticles = 0;
+            // 0. Count references fully vectorized into the Knowledge Base (ref_knowledge_status >= 3)
+            let knowledgeBase = 0;
             try {
-                const shortlistQuery = 'SELECT * FROM c WHERE c.type = "shortlist" OFFSET 0 LIMIT 1';
-                const shortlistItems = await queryItems(CONTAINER_NAME, { query: shortlistQuery });
-                const shortlistDoc = shortlistItems.length > 0 ? shortlistItems[0] : null;
-                const articles = Array.isArray(shortlistDoc?.articles) ? shortlistDoc.articles : [];
-                newArticles = articles.length;
+                const kbQuery = 'SELECT VALUE COUNT(1) FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
+                const kbResult = await queryItems(REFERENCES_CONTAINER, { query: kbQuery });
+                knowledgeBase = kbResult[0] || 0;
             } catch (e) {
-                context.warn('Could not fetch shortlist count:', e.message);
+                context.warn('Could not fetch knowledge base count:', e.message);
             }
             
-            // 1. Count references (sources parsed)
-            const referencesQuery = 'SELECT VALUE COUNT(1) FROM c WHERE NOT IS_DEFINED(c.dismissed) OR c.dismissed != true';
-            const refCountResult = await queryItems(REFERENCES_CONTAINER, { query: referencesQuery });
-            const sourcesParsed = refCountResult[0] || 0;
+            // 1. Count references still awaiting review (ref_knowledge_status < 3 or not defined)
+            let sourcesForReview = 0;
+            try {
+                const reviewQuery = 'SELECT VALUE COUNT(1) FROM c WHERE (NOT IS_DEFINED(c.ref_knowledge_status) OR c.ref_knowledge_status < 3) AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
+                const reviewResult = await queryItems(REFERENCES_CONTAINER, { query: reviewQuery });
+                sourcesForReview = reviewResult[0] || 0;
+            } catch (e) {
+                context.warn('Could not fetch sources for review count:', e.message);
+            }
             
             // 2. Get word count from Writing Analytics (look for "Working DRAFT" document)
             let wordCount = 0;
@@ -735,11 +738,11 @@ app.http('RefreshDashboardAnalytics', {
             
             // Add to history before updating
             const now = new Date().toISOString();
-            if (snapshot.sourcesParsed !== undefined) {
+            if (snapshot.knowledgeBase !== undefined || snapshot.sourcesForReview !== undefined) {
                 const historyEntry = {
                     timestamp: now,
-                    newArticles: snapshot.newArticles,
-                    sourcesParsed: snapshot.sourcesParsed,
+                    knowledgeBase: snapshot.knowledgeBase,
+                    sourcesForReview: snapshot.sourcesForReview,
                     wordCount: snapshot.wordCount,
                     surveyResponses: snapshot.surveyResponses
                 };
@@ -747,8 +750,8 @@ app.http('RefreshDashboardAnalytics', {
             }
             
             // Update with fresh values
-            snapshot.newArticles = newArticles;
-            snapshot.sourcesParsed = sourcesParsed;
+            snapshot.knowledgeBase = knowledgeBase;
+            snapshot.sourcesForReview = sourcesForReview;
             snapshot.wordCount = wordCount;
             snapshot.daysToMilestone = daysToMilestone;
             snapshot.milestoneName = milestoneName;
@@ -757,7 +760,7 @@ app.http('RefreshDashboardAnalytics', {
             
             await upsertItem(CONTAINER_NAME, snapshot);
             
-            context.log(`Dashboard refreshed: ${sourcesParsed} sources, ${wordCount} words, ${surveyResponses} surveys`);
+            context.log(`Dashboard refreshed: KB=${knowledgeBase}, forReview=${sourcesForReview}, words=${wordCount}, surveys=${surveyResponses}`);
             
             // Calculate weekly changes
             const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
@@ -767,13 +770,13 @@ app.http('RefreshDashboardAnalytics', {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    newArticles: {
-                        current: newArticles,
-                        weekChange: weekAgoEntry ? newArticles - (weekAgoEntry.newArticles || 0) : 0
+                    knowledgeBase: {
+                        current: knowledgeBase,
+                        weekChange: weekAgoEntry ? knowledgeBase - (weekAgoEntry.knowledgeBase || 0) : 0
                     },
-                    sourcesParsed: {
-                        current: sourcesParsed,
-                        weekChange: weekAgoEntry ? sourcesParsed - (weekAgoEntry.sourcesParsed || 0) : 0
+                    sourcesForReview: {
+                        current: sourcesForReview,
+                        weekChange: weekAgoEntry ? sourcesForReview - (weekAgoEntry.sourcesForReview || 0) : 0
                     },
                     wordCount: {
                         current: wordCount,

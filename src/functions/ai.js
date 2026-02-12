@@ -232,17 +232,26 @@ app.http('KBRagChat', {
                 }
             }
 
-            const input = [
+            const instructions = [
                 systemPrompt,
-                'You are a research assistant. Answer using ONLY the provided file search results from the user\'s academic corpus.',
-                'When you make a claim that is supported by a source, append a citation marker in the exact form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id for that source.',
+                '',
+                '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
+                'You are a research assistant. Answer using ONLY the provided file_search results from the user\'s academic corpus.',
+                'When you make a claim supported by a source, append a citation marker in the EXACT form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id (e.g. file-abc123) from the file_search results.',
+                'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
+                'If you cannot find a supporting source in the file_search results, do NOT cite anything — just state the claim without a citation marker.',
                 'Keep answers concise but academically rigorous.',
+                '--- END CITATION RULES ---'
+            ].filter(Boolean).join('\n');
+
+            const input = [
                 historyText ? `Conversation so far:\n${historyText}` : '',
                 `User question: ${query}`
             ].filter(Boolean).join('\n\n');
 
             const basePayload = {
                 model,
+                instructions,
                 input,
                 tools: [
                     {
@@ -376,17 +385,26 @@ app.http('KBRagChatStream', {
                 }
             }
 
-            const input = [
+            const instructions = [
                 systemPrompt,
-                'You are a research assistant. Answer using ONLY the provided file search results from the user\'s academic corpus.',
-                'When you make a claim that is supported by a source, append a citation marker in the exact form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id for that source.',
+                '',
+                '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
+                'You are a research assistant. Answer using ONLY the provided file_search results from the user\'s academic corpus.',
+                'When you make a claim supported by a source, append a citation marker in the EXACT form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id (e.g. file-abc123) from the file_search results.',
+                'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
+                'If you cannot find a supporting source in the file_search results, do NOT cite anything — just state the claim without a citation marker.',
                 'Keep answers concise but academically rigorous.',
+                '--- END CITATION RULES ---'
+            ].filter(Boolean).join('\n');
+
+            const input = [
                 historyText ? `Conversation so far:\n${historyText}` : '',
                 `User question: ${query}`
             ].filter(Boolean).join('\n\n');
 
             const basePayload = {
                 model,
+                instructions,
                 input,
                 tools: [
                     {
