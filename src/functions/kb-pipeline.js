@@ -589,10 +589,32 @@ app.http('KBOCRPages', {
             let pagesProcessed = 0;
             const retryPages = [];
 
+            const isSuccessfulOcrPage = (pageDoc) => (
+                pageDoc?.ocrStatus === 1
+                && typeof pageDoc?.ocrText === 'string'
+                && pageDoc.ocrText.trim().length > 0
+            );
+
+            const getLatestPageRecord = async (pageId) => {
+                try {
+                    return await getItem(CONTAINER_PAGES, pageId, pageId);
+                } catch (readError) {
+                    context.warn?.(`[KB OCR] Could not refresh page ${pageId}: ${readError.message}`);
+                    return null;
+                }
+            };
+
             const runOcrForPage = async (page, attempt) => {
                 const pageNumber = page.pageNumber;
+                const latestBeforeStart = await getLatestPageRecord(page.id);
+                const baselinePage = latestBeforeStart || page;
+
+                if (isSuccessfulOcrPage(baselinePage)) {
+                    return { ok: true };
+                }
+
                 const processingRecord = {
-                    ...page,
+                    ...baselinePage,
                     ocrStatus: 2,
                     ocrStartedAt: new Date().toISOString(),
                     ocrCompletedAt: null,
@@ -604,7 +626,7 @@ app.http('KBOCRPages', {
 
                 try {
                     const runAttempt = async () => {
-                        const pdfBuffer = await downloadBlob(BLOB_CONTAINER_PAGES, page.blobName);
+                        const pdfBuffer = await downloadBlob(BLOB_CONTAINER_PAGES, baselinePage.blobName || page.blobName);
                         return await postPdfToOcr(ocrUrl, pdfBuffer, context);
                     };
 
@@ -615,8 +637,13 @@ app.http('KBOCRPages', {
                     );
 
                     if (!ocrRes.ok) {
+                        const latestAfterFailure = await getLatestPageRecord(page.id);
+                        if (isSuccessfulOcrPage(latestAfterFailure)) {
+                            return { ok: true };
+                        }
+
                         await upsertItem(CONTAINER_PAGES, {
-                            ...processingRecord,
+                            ...(latestAfterFailure || processingRecord),
                             ocrStatus: -1,
                             ocrError: ocrRes.error || 'OCR request failed',
                             ocrText: null,
@@ -629,8 +656,13 @@ app.http('KBOCRPages', {
                     const extracted = ocrResult.text || (typeof ocrRes.rawText === 'string' ? ocrRes.rawText.trim() : null);
 
                     if (!extracted) {
+                        const latestAfterFailure = await getLatestPageRecord(page.id);
+                        if (isSuccessfulOcrPage(latestAfterFailure)) {
+                            return { ok: true };
+                        }
+
                         await upsertItem(CONTAINER_PAGES, {
-                            ...processingRecord,
+                            ...(latestAfterFailure || processingRecord),
                             ocrStatus: -1,
                             ocrError: 'OCR response did not include extractable text',
                             ocrText: null,
@@ -639,8 +671,14 @@ app.http('KBOCRPages', {
                         return { ok: false };
                     }
 
+                    const latestBeforeSuccessWrite = await getLatestPageRecord(page.id);
+                    const successRecordBase = latestBeforeSuccessWrite || processingRecord;
+                    if (isSuccessfulOcrPage(successRecordBase)) {
+                        return { ok: true };
+                    }
+
                     await upsertItem(CONTAINER_PAGES, {
-                        ...processingRecord,
+                        ...successRecordBase,
                         ocrStatus: 1,
                         ocrError: null,
                         ocrText: extracted,
@@ -650,8 +688,14 @@ app.http('KBOCRPages', {
                     return { ok: true };
                 } catch (pageError) {
                     context.error(`[KB OCR] Error processing page ${pageNumber}:`, pageError.message);
+
+                    const latestAfterFailure = await getLatestPageRecord(page.id);
+                    if (isSuccessfulOcrPage(latestAfterFailure)) {
+                        return { ok: true };
+                    }
+
                     await upsertItem(CONTAINER_PAGES, {
-                        ...processingRecord,
+                        ...(latestAfterFailure || processingRecord),
                         ocrStatus: -1,
                         ocrError: pageError.message,
                         ocrCompletedAt: new Date().toISOString()
