@@ -486,6 +486,18 @@ app.http('GetAnalyticsHistory', {
 // Dashboard snapshot document ID
 const DASHBOARD_SNAPSHOT_ID = 'dashboard_snapshot';
 
+function getWeekChangeFromHistory(history, field, current) {
+    if (!Array.isArray(history) || history.length === 0) return 0;
+    const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+    const weekAgoEntry = history.find(entry => {
+        if (!entry || entry[field] === undefined) return false;
+        const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : 0;
+        return ts && ts <= oneWeekAgo;
+    });
+    if (!weekAgoEntry) return 0;
+    return (current || 0) - (weekAgoEntry[field] || 0);
+}
+
 // GET /api/analytics/dashboard - Get dashboard stats with weekly change
 app.http('GetDashboardAnalytics', {
     methods: ['GET'],
@@ -518,23 +530,20 @@ app.http('GetDashboardAnalytics', {
             const isStale = !lastUpdated || (Date.now() - lastUpdated.getTime() > 12 * 60 * 60 * 1000);
             
             // Calculate weekly changes from history
-            const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
             const history = snapshot.history || [];
-            
-            const weekAgoEntry = history.find(h => new Date(h.timestamp).getTime() <= oneWeekAgo) || history[history.length - 1];
             
             const response = {
                 knowledgeBase: {
                     current: snapshot.knowledgeBase || 0,
-                    weekChange: weekAgoEntry ? (snapshot.knowledgeBase || 0) - (weekAgoEntry.knowledgeBase || 0) : 0
+                    weekChange: getWeekChangeFromHistory(history, 'knowledgeBase', snapshot.knowledgeBase)
                 },
                 sourcesForReview: {
                     current: snapshot.sourcesForReview || 0,
-                    weekChange: weekAgoEntry ? (snapshot.sourcesForReview || 0) - (weekAgoEntry.sourcesForReview || 0) : 0
+                    weekChange: getWeekChangeFromHistory(history, 'sourcesForReview', snapshot.sourcesForReview)
                 },
                 wordCount: {
                     current: snapshot.wordCount || 0,
-                    weekChange: weekAgoEntry ? (snapshot.wordCount || 0) - (weekAgoEntry.wordCount || 0) : 0,
+                    weekChange: getWeekChangeFromHistory(history, 'wordCount', snapshot.wordCount),
                     target: snapshot.wordCountTarget || 80000
                 },
                 daysToMilestone: {
@@ -543,7 +552,7 @@ app.http('GetDashboardAnalytics', {
                 },
                 surveyResponses: {
                     current: snapshot.surveyResponses || 0,
-                    weekChange: weekAgoEntry ? (snapshot.surveyResponses || 0) - (weekAgoEntry.surveyResponses || 0) : 0
+                    weekChange: getWeekChangeFromHistory(history, 'surveyResponses', snapshot.surveyResponses)
                 },
                 lastUpdated: snapshot.lastUpdated,
                 needsRefresh: isStale
@@ -763,24 +772,23 @@ app.http('RefreshDashboardAnalytics', {
             context.log(`Dashboard refreshed: KB=${knowledgeBase}, forReview=${sourcesForReview}, words=${wordCount}, surveys=${surveyResponses}`);
             
             // Calculate weekly changes
-            const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-            const weekAgoEntry = snapshot.history.find(h => new Date(h.timestamp).getTime() <= oneWeekAgo) || snapshot.history[snapshot.history.length - 1];
-            
+            const history = snapshot.history || [];
+
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     knowledgeBase: {
                         current: knowledgeBase,
-                        weekChange: weekAgoEntry ? knowledgeBase - (weekAgoEntry.knowledgeBase || 0) : 0
+                        weekChange: getWeekChangeFromHistory(history, 'knowledgeBase', knowledgeBase)
                     },
                     sourcesForReview: {
                         current: sourcesForReview,
-                        weekChange: weekAgoEntry ? sourcesForReview - (weekAgoEntry.sourcesForReview || 0) : 0
+                        weekChange: getWeekChangeFromHistory(history, 'sourcesForReview', sourcesForReview)
                     },
                     wordCount: {
                         current: wordCount,
-                        weekChange: weekAgoEntry ? wordCount - (weekAgoEntry.wordCount || 0) : 0,
+                        weekChange: getWeekChangeFromHistory(history, 'wordCount', wordCount),
                         target: snapshot.wordCountTarget || 80000
                     },
                     daysToMilestone: {
@@ -789,7 +797,7 @@ app.http('RefreshDashboardAnalytics', {
                     },
                     surveyResponses: {
                         current: surveyResponses,
-                        weekChange: weekAgoEntry ? surveyResponses - (weekAgoEntry.surveyResponses || 0) : 0
+                        weekChange: getWeekChangeFromHistory(history, 'surveyResponses', surveyResponses)
                     },
                     lastUpdated: now,
                     needsRefresh: false
