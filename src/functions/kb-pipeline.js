@@ -952,19 +952,23 @@ app.http('KBVectorizePages', {
         }
 
         let requestedJobId = null;
+        let allowPartialOcr = false;
         try {
             const body = await request.json();
             if (body && typeof body.jobId === 'string') {
                 requestedJobId = body.jobId.trim();
             }
+            allowPartialOcr = body?.allowPartialOcr === true;
         } catch (error) {
             requestedJobId = null;
+            allowPartialOcr = false;
         }
 
         let jobRecord = null;
         let pagesSucceeded = 0;
         let pagesFailed = 0;
         let totalPages = 0;
+        let skippedOcrPages = 0;
 
         try {
             // Initialize OpenAI client
@@ -1007,6 +1011,69 @@ app.http('KBVectorizePages', {
                 });
             }
 
+            const allPages = await queryItems(CONTAINER_PAGES, {
+                query: 'SELECT * FROM c WHERE c.referenceId = @referenceId',
+                parameters: [{ name: '@referenceId', value: referenceId }]
+            });
+
+            if (!allPages || allPages.length === 0) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.',
+                    completedAt: new Date().toISOString()
+                });
+                return withCorsHeaders({
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.', jobId })
+                });
+            }
+
+            const hasCompletedVector = (pageDoc) => (
+                pageDoc?.openaiVector
+                && pageDoc.openaiVector.fileId
+                && pageDoc.openaiVector.status === 'completed'
+            );
+            const ocrReadyPages = allPages.filter(p => p.ocrStatus === 1);
+            const pendingOcr = allPages.filter(p => p.ocrStatus !== 1);
+            skippedOcrPages = pendingOcr.length;
+
+            if (pendingOcr.length > 0 && !allowPartialOcr) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'Some pages have not completed OCR yet. Fix OCR errors or use Proceed Anyway.',
+                    completedAt: new Date().toISOString()
+                });
+                return withCorsHeaders({
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'Some pages have not completed OCR yet. Fix OCR errors or use Proceed Anyway.',
+                        pendingOcrCount: pendingOcr.length,
+                        jobId
+                    })
+                });
+            }
+
+            if (allowPartialOcr && ocrReadyPages.length === 0) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'Proceed Anyway selected, but no OCR-successful pages are available for vectorization.',
+                    completedAt: new Date().toISOString()
+                });
+                return withCorsHeaders({
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'Proceed Anyway selected, but no OCR-successful pages are available for vectorization.',
+                        jobId
+                    })
+                });
+            }
+
             // Query pages with ocrStatus=1 and no openaiVector yet
             const pages = await queryItems(CONTAINER_PAGES, {
                 query: `SELECT * FROM c 
@@ -1023,26 +1090,6 @@ app.http('KBVectorizePages', {
             });
 
             if (!pages || pages.length === 0) {
-                // Check if all pages are already vectorized
-                const allPages = await queryItems(CONTAINER_PAGES, {
-                    query: 'SELECT * FROM c WHERE c.referenceId = @referenceId',
-                    parameters: [{ name: '@referenceId', value: referenceId }]
-                });
-
-                if (!allPages || allPages.length === 0) {
-                    await upsertItem(CONTAINER_JOBS, {
-                        ...jobRecord,
-                        status: 'error',
-                        error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.',
-                        completedAt: new Date().toISOString()
-                    });
-                    return withCorsHeaders({
-                        status: 400,
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ error: 'No pages found for this reference. Run Step 1 (split) and Step 2 (OCR) first.', jobId })
-                    });
-                }
-
                 const alreadyVectorized = allPages.filter(p => p.openaiVector && p.openaiVector.fileId);
                 if (alreadyVectorized.length === allPages.length) {
                     await upsertItem(CONTAINER_JOBS, {
@@ -1063,29 +1110,72 @@ app.http('KBVectorizePages', {
                             referenceId,
                             totalPages: allPages.length,
                             pagesVectorized: alreadyVectorized.length,
+                            skippedOcrPages,
+                            proceededWithPartialOcr: allowPartialOcr,
                             jobId
                         })
                     });
                 }
 
-                const pendingOcr = allPages.filter(p => p.ocrStatus !== 1);
-                if (pendingOcr.length > 0) {
+                const ocrReadyAlreadyVectorized = ocrReadyPages.length > 0 && ocrReadyPages.every(hasCompletedVector);
+                if (allowPartialOcr && ocrReadyAlreadyVectorized) {
+                    const partialStatus = 3;
+                    await upsertItem(CONTAINER_REFERENCES, {
+                        ...reference,
+                        ref_knowledge_status: partialStatus,
+                        kb_vectorize_completed: new Date().toISOString(),
+                        kb_vectorize_pages_succeeded: ocrReadyPages.length,
+                        kb_vectorize_pages_failed: 0,
+                        kb_vector_store_id: VECTOR_STORE_ID,
+                        kb_vectorize_partial_ocr: true,
+                        kb_vectorize_skipped_ocr_pages: skippedOcrPages
+                    });
+
                     await upsertItem(CONTAINER_JOBS, {
                         ...jobRecord,
-                        status: 'error',
-                        error: 'Some pages have not completed OCR yet. Run Step 2 first.',
-                        completedAt: new Date().toISOString()
+                        status: 'complete',
+                        totalPages: ocrReadyPages.length,
+                        pagesCompleted: ocrReadyPages.length,
+                        pagesSucceeded: ocrReadyPages.length,
+                        pagesFailed: 0,
+                        completedAt: new Date().toISOString(),
+                        ttl: JOB_TTL_SECONDS
                     });
+
                     return withCorsHeaders({
-                        status: 400,
+                        status: 200,
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ 
-                            error: 'Some pages have not completed OCR yet. Run Step 2 first.',
-                            pendingOcrCount: pendingOcr.length,
+                        body: JSON.stringify({
+                            success: true,
+                            message: 'Proceed Anyway complete. OCR-successful pages were already vectorized.',
+                            referenceId,
+                            totalPages: ocrReadyPages.length,
+                            pagesSucceeded: ocrReadyPages.length,
+                            pagesFailed: 0,
+                            skippedOcrPages,
+                            proceededWithPartialOcr: true,
+                            newStatus: partialStatus,
                             jobId
                         })
                     });
                 }
+
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'No OCR-successful pages pending vectorization.',
+                    completedAt: new Date().toISOString()
+                });
+                return withCorsHeaders({
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'No OCR-successful pages pending vectorization.',
+                        skippedOcrPages,
+                        proceededWithPartialOcr: allowPartialOcr,
+                        jobId
+                    })
+                });
             }
 
             totalPages = pages.length;
@@ -1259,7 +1349,9 @@ app.http('KBVectorizePages', {
                 kb_vectorize_completed: new Date().toISOString(),
                 kb_vectorize_pages_succeeded: pagesSucceeded,
                 kb_vectorize_pages_failed: pagesFailed,
-                kb_vector_store_id: VECTOR_STORE_ID
+                kb_vector_store_id: VECTOR_STORE_ID,
+                kb_vectorize_partial_ocr: allowPartialOcr && skippedOcrPages > 0,
+                kb_vectorize_skipped_ocr_pages: allowPartialOcr ? skippedOcrPages : 0
             };
             await upsertItem(CONTAINER_REFERENCES, updatedReference);
 
@@ -1292,6 +1384,8 @@ app.http('KBVectorizePages', {
                     totalPages,
                     pagesSucceeded,
                     pagesFailed,
+                    skippedOcrPages,
+                    proceededWithPartialOcr: allowPartialOcr,
                     newStatus
                 })
             });
