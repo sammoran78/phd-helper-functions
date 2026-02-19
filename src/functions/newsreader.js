@@ -137,6 +137,40 @@ const parseYearFromText = (text = '') => {
     return match ? parseInt(match[0], 10) : null;
 };
 
+const normalizeAuthors = (authorsValue) => {
+    if (!authorsValue) return 'Unknown Author';
+
+    if (typeof authorsValue === 'string') {
+        const cleaned = authorsValue.trim();
+        return cleaned || 'Unknown Author';
+    }
+
+    if (Array.isArray(authorsValue)) {
+        const list = authorsValue.map(author => {
+            if (!author) return '';
+            if (typeof author === 'string') return author.trim();
+            if (author.name) return author.name.trim();
+            if (author.family || author.given) {
+                return [author.family, author.given].filter(Boolean).join(', ').trim();
+            }
+            return '';
+        }).filter(Boolean);
+        return list.length > 0 ? list.join('; ') : 'Unknown Author';
+    }
+
+    if (typeof authorsValue === 'object') {
+        if (Array.isArray(authorsValue.authors)) {
+            return normalizeAuthors(authorsValue.authors);
+        }
+        if (authorsValue.name) return authorsValue.name.toString().trim() || 'Unknown Author';
+        if (authorsValue.family || authorsValue.given) {
+            return [authorsValue.family, authorsValue.given].filter(Boolean).join(', ').trim() || 'Unknown Author';
+        }
+    }
+
+    return 'Unknown Author';
+};
+
 const parseArxivEntries = (xml) => {
     const entries = xml.split('<entry>').slice(1);
     return entries.map(entry => {
@@ -516,6 +550,14 @@ app.http('GetNewsreaderArticles', {
 
             const REQUIRED_QUERY_ANCHOR = 'creative labor creative industries arts media communication';
             const anchorQuery = (query = '') => `${query} ${REQUIRED_QUERY_ANCHOR}`.replace(/\s+/g, ' ').trim();
+
+            const RQ_SEARCH_QUERIES = [
+                { query: 'creative agency generative AI creative workers lived experience interviews ethnography', category: 'RQ1: Creative Agency' },
+                { query: 'co-creation tactics steering constraining prompts authorship credit client transparency generative AI', category: 'RQ2a: Co-Creation Tactics' },
+                { query: 'validation transferability AI creative tactics across music screen design interactive career stages', category: 'RQ2b: Transferability' },
+                { query: 'teaching resources industry guidance policy recommendations sustainable creative practice generative AI', category: 'RQ3: Translation to Practice' },
+                { query: 'attribution metadata provenance royalty licensing consent compensation creators generative AI systems', category: 'Attribution & Royalties' }
+            ];
             
             // Search queries
             const baseSearchQueries = [
@@ -611,13 +653,53 @@ app.http('GetNewsreaderArticles', {
                     category: `Domain: ${domain}`
                 }));
 
-            // Combine queries, prioritizing gaps
+            // Combine queries with explicit RQ-first prioritization and dedupe
             const searchQueries = [
+                ...RQ_SEARCH_QUERIES.map(q => ({ ...q, query: anchorQuery(q.query) })),
                 ...gapQueries,
                 ...subjectQueries,
                 ...domainQueries,
                 ...baseSearchQueries.map(q => ({ ...q, query: anchorQuery(q.query) }))
-            ];
+            ].filter((entry, idx, arr) => {
+                const normalized = normalizeValue(entry?.query);
+                return arr.findIndex(x => normalizeValue(x?.query) === normalized) === idx;
+            });
+
+            const scoreArticleRelevance = (title, abstract) => {
+                const titleText = (title || '').toLowerCase();
+                const abstractText = (abstract || '').toLowerCase();
+                const fullText = `${titleText} ${abstractText}`;
+
+                let score = 0;
+
+                const aiTitleHit = AI_RELEVANCE_KEYWORDS.some(kw => titleText.includes(kw.toLowerCase()));
+                const aiAbstractHit = AI_RELEVANCE_KEYWORDS.some(kw => abstractText.includes(kw.toLowerCase()));
+                const scopeTitleHit = THESIS_SCOPE_KEYWORDS.some(kw => titleText.includes(kw.toLowerCase()));
+                const scopeAbstractHit = THESIS_SCOPE_KEYWORDS.some(kw => abstractText.includes(kw.toLowerCase()));
+
+                if (aiTitleHit) score += 4;
+                else if (aiAbstractHit) score += 2;
+
+                if (scopeTitleHit) score += 4;
+                else if (scopeAbstractHit) score += 2;
+
+                const focusGroups = [
+                    ['creative agency', 'agency', 'autonomy', 'creative worker', 'co-creation'],
+                    ['workflow', 'tactic', 'strategy', 'authorship', 'credit', 'client transparency', 'steering', 'constraining'],
+                    ['validation', 'transferable', 'transferability', 'music', 'screen', 'design', 'interactive', 'career stage'],
+                    ['teaching', 'curriculum', 'industry guidance', 'policy', 'sustainable practice'],
+                    ['attribution', 'metadata', 'provenance', 'royalty', 'licensing', 'consent', 'compensation']
+                ];
+
+                focusGroups.forEach(group => {
+                    const titleHit = group.some(term => titleText.includes(term));
+                    const fullHit = group.some(term => fullText.includes(term));
+                    if (titleHit) score += 3;
+                    else if (fullHit) score += 1;
+                });
+
+                return score;
+            };
             
             const isRelevantArticle = (title, abstract) => {
                 const text = `${title || ''} ${abstract || ''}`.toLowerCase();
@@ -643,18 +725,22 @@ app.http('GetNewsreaderArticles', {
                     /\bfinancial\b/i, /\bbanking\b/i, /\bstock\b/i,
                     /\bmilitary\b/i, /\bdefense\b/i, /\bweapon\b/i
                 ];
-                return !offTopicPatterns.some(pattern => pattern.test(text));
+                if (offTopicPatterns.some(pattern => pattern.test(text))) return false;
+
+                const relevanceScore = scoreArticleRelevance(title, abstract);
+                return relevanceScore >= 6;
             };
             
             const allArticles = [];
             const now = new Date();
             const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
             const sixMonthsAgo = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
-            const oneYearAgo = new Date(now.getTime() - 365 * 24 * 60 * 60 * 1000);
+            const twelveYearsAgo = new Date(now.getTime() - 12 * 365 * 24 * 60 * 60 * 1000);
+            const minYear = filterNew ? now.getFullYear() - 1 : now.getFullYear() - 12;
             
             const fromDate = filterNew 
                 ? sixMonthsAgo.toISOString().split('T')[0]
-                : oneYearAgo.toISOString().split('T')[0];
+                : twelveYearsAgo.toISOString().split('T')[0];
             
             const isTooSimilarToDismissed = (title) => {
                 if (!title || dismissedTokenSets.length === 0) return false;
@@ -730,7 +816,7 @@ app.http('GetNewsreaderArticles', {
                         if (!isValidArticle(title, doi, abstract)) continue;
                         
                         const year = parseYear(item);
-                        if (!year || year < 2020 || year > 2026) continue;
+                        if (!year || year < minYear || year > now.getFullYear() + 1) continue;
                         
                         const pubDate = getPublishedDate(item);
                         const isNew = pubDate && pubDate >= ninetyDaysAgo;
@@ -749,7 +835,7 @@ app.http('GetNewsreaderArticles', {
                         allArticles.push({
                             doi,
                             title,
-                            authors: authors || 'Unknown Author',
+                            authors: normalizeAuthors(authors),
                             year: String(year),
                             source,
                             type: typeMap[item.type] || 'Article',
@@ -758,6 +844,7 @@ app.http('GetNewsreaderArticles', {
                             category: sq.category,
                             isNew,
                             publishedDate: pubDate?.toISOString(),
+                            relevanceScore: scoreArticleRelevance(title, abstract),
                             apiSource: 'CrossRef',
                             doiKey: normalizeDoi(doi),
                             titleKey: normalizeValue(title)
@@ -784,7 +871,7 @@ app.http('GetNewsreaderArticles', {
                         if (!isValidArticle(title, doi || paper.paperId, paperAbstract)) continue;
                         
                         const year = paper.year;
-                        if (!year || year < 2023 || year > 2026) continue;
+                        if (!year || year < minYear || year > now.getFullYear() + 1) continue;
                         
                         const pubDate = paper.publicationDate ? new Date(paper.publicationDate) : null;
                         const isNew = pubDate && pubDate >= ninetyDaysAgo;
@@ -794,7 +881,7 @@ app.http('GetNewsreaderArticles', {
                         allArticles.push({
                             doi: doi || paper.paperId,
                             title,
-                            authors,
+                            authors: normalizeAuthors(authors),
                             year: String(year),
                             source: paper.venue || 'Semantic Scholar',
                             type: 'Article',
@@ -803,6 +890,7 @@ app.http('GetNewsreaderArticles', {
                             category: sq.category,
                             isNew,
                             publishedDate: pubDate?.toISOString(),
+                            relevanceScore: scoreArticleRelevance(title, paperAbstract),
                             apiSource: 'Semantic Scholar',
                             doiKey: normalizeDoi(doi || paper.paperId),
                             titleKey: normalizeValue(title)
@@ -830,12 +918,14 @@ app.http('GetNewsreaderArticles', {
 
                             const summaryText = item.publication_info?.summary || item.publication_info?.authors || '';
                             const year = parseYearFromText(summaryText) || parseYearFromText(abstract);
-                            if (!year || year < 2020 || year > 2026) continue;
+                            if (!year || year < minYear || year > now.getFullYear() + 1) continue;
+
+                            const googleAuthors = normalizeAuthors(item.publication_info?.authors || item.publication_info?.summary || '');
 
                             allArticles.push({
                                 doi: doi || link,
                                 title,
-                                authors: item.publication_info?.authors || 'Unknown Author',
+                                authors: googleAuthors,
                                 year: String(year),
                                 source: 'Google Scholar',
                                 type: 'Article',
@@ -844,6 +934,7 @@ app.http('GetNewsreaderArticles', {
                                 category: sq.category,
                                 isNew: year >= now.getFullYear() - 1,
                                 publishedDate: null,
+                                relevanceScore: scoreArticleRelevance(title, abstract),
                                 apiSource: 'Google Scholar (SerpAPI)',
                                 doiKey: normalizeDoi(doi || link),
                                 titleKey: normalizeValue(title)
@@ -873,14 +964,14 @@ app.http('GetNewsreaderArticles', {
 
                         const publishedDate = entry.published ? new Date(entry.published) : null;
                         const year = publishedDate ? publishedDate.getFullYear() : null;
-                        if (!year || year < 2020 || year > 2026) continue;
+                        if (!year || year < minYear || year > now.getFullYear() + 1) continue;
 
                         const isNew = publishedDate && publishedDate >= ninetyDaysAgo;
 
                         allArticles.push({
                             doi: entry.doi || entry.id,
                             title,
-                            authors: entry.authors || 'Unknown Author',
+                            authors: normalizeAuthors(entry.authors),
                             year: String(year),
                             source: 'arXiv',
                             type: 'Preprint',
@@ -889,6 +980,7 @@ app.http('GetNewsreaderArticles', {
                             category: sq.category,
                             isNew,
                             publishedDate: publishedDate?.toISOString(),
+                            relevanceScore: scoreArticleRelevance(title, abstract),
                             apiSource: 'arXiv',
                             doiKey: normalizeDoi(entry.doi || entry.id),
                             titleKey: normalizeValue(title)
@@ -897,8 +989,10 @@ app.http('GetNewsreaderArticles', {
                 } catch (e) { context.warn('[Newsreader] arXiv query failed:', sq.query, e.message); }
             }
             
-            // Sort by date (newest first)
+            // Sort by relevance first, then recency
             let results = allArticles.sort((a, b) => {
+                const relevanceDiff = (b.relevanceScore || 0) - (a.relevanceScore || 0);
+                if (relevanceDiff !== 0) return relevanceDiff;
                 const dateA = a.publishedDate ? new Date(a.publishedDate) : new Date(a.year, 0, 1);
                 const dateB = b.publishedDate ? new Date(b.publishedDate) : new Date(b.year, 0, 1);
                 return dateB - dateA;
