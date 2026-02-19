@@ -1,6 +1,7 @@
 const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
@@ -139,6 +140,127 @@ app.http('GetReferences', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to load references', details: error.message })
+            };
+        }
+    }
+});
+
+// GET /api/references/bibliography/export-pdf - Export bibliography list as PDF
+app.http('ExportBibliographyPdf', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'references/bibliography/export-pdf',
+    handler: async (request, context) => {
+        try {
+            context.log('Exporting bibliography to PDF');
+
+            const references = await queryItems(CONTAINER_NAME, {
+                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+            });
+
+            const sorted = sortBibliographyReferences(references);
+
+            const pdfDoc = await PDFDocument.create();
+            const font = await pdfDoc.embedFont(StandardFonts.TimesRoman);
+            const fontSize = 12;
+            const lineHeight = 16;
+            const margin = 54;
+            const pageWidth = 612;
+            const pageHeight = 792;
+
+            let page = pdfDoc.addPage([pageWidth, pageHeight]);
+            let y = pageHeight - margin;
+
+            sorted.forEach(ref => {
+                const apa7 = (ref.apa7 || '').toString().trim();
+                const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
+                const text = stripApaFormatting(apa7 || fallback);
+                const lines = wrapText(text, pageWidth - margin * 2, font, fontSize);
+
+                if (y - lines.length * lineHeight < margin) {
+                    page = pdfDoc.addPage([pageWidth, pageHeight]);
+                    y = pageHeight - margin;
+                }
+
+                lines.forEach(line => {
+                    page.drawText(line, {
+                        x: margin,
+                        y,
+                        size: fontSize,
+                        font,
+                        color: rgb(0.1, 0.1, 0.1)
+                    });
+                    y -= lineHeight;
+                });
+
+                y -= 8;
+            });
+
+            if (sorted.length === 0) {
+                page.drawText('No bibliography entries.', {
+                    x: margin,
+                    y,
+                    size: fontSize,
+                    font,
+                    color: rgb(0.1, 0.1, 0.1)
+                });
+            }
+
+            const pdfBytes = await pdfDoc.save();
+            const fileName = `bibliography_${new Date().toISOString().slice(0, 10)}.pdf`;
+
+            return {
+                status: 200,
+                isRaw: true,
+                headers: {
+                    'Content-Type': 'application/pdf',
+                    'Content-Disposition': `attachment; filename="${fileName}"`
+                },
+                body: Buffer.from(pdfBytes)
+            };
+        } catch (error) {
+            context.error('Export Bibliography PDF Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to export bibliography', details: error.message })
+            };
+        }
+    }
+});
+
+// GET /api/references/bibliography/export-bibtex - Export bibliography list as BibTeX
+app.http('ExportBibliographyBibtex', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'references/bibliography/export-bibtex',
+    handler: async (request, context) => {
+        try {
+            context.log('Exporting bibliography to BibTeX');
+
+            const references = await queryItems(CONTAINER_NAME, {
+                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+            });
+
+            const sorted = sortBibliographyReferences(references);
+            const entries = sorted.map(ref => formatBibtexEntry(ref));
+            const content = entries.length > 0 ? `${entries.join('\n\n')}\n` : '';
+            const fileName = `bibliography_${new Date().toISOString().slice(0, 10)}.bib`;
+
+            return {
+                status: 200,
+                headers: {
+                    'Content-Type': 'application/x-bibtex; charset=utf-8',
+                    'Content-Disposition': `attachment; filename="${fileName}"`
+                },
+                body: content
+            };
+        } catch (error) {
+            context.error('Export Bibliography BibTeX Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to export bibliography', details: error.message })
             };
         }
     }
@@ -322,6 +444,63 @@ function parseSimpleMarkdownRuns(text) {
 
     return runs;
 }
+
+const stripApaFormatting = (text) => (text || '')
+    .toString()
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\*\*/g, '')
+    .replace(/\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const wrapText = (text, maxWidth, font, fontSize) => {
+    const words = (text || '').split(/\s+/).filter(Boolean);
+    const lines = [];
+    let current = '';
+    for (const word of words) {
+        const next = current ? `${current} ${word}` : word;
+        const width = font.widthOfTextAtSize(next, fontSize);
+        if (width <= maxWidth) {
+            current = next;
+        } else {
+            if (current) lines.push(current);
+            current = word;
+        }
+    }
+    if (current) lines.push(current);
+    return lines;
+};
+
+const buildBibtexKey = (reference) => {
+    const author = (reference?.authors || reference?.author || 'ref').toString().split(/[,;&]/)[0].trim();
+    const year = (reference?.year || 'n.d.').toString().replace(/[^0-9]/g, '') || 'nd';
+    const title = (reference?.title || 'untitled').toString().split(/\s+/)[0];
+    const raw = `${author}${year}${title}`.toLowerCase();
+    return raw.replace(/[^a-z0-9]+/g, '').slice(0, 40) || `ref${Date.now()}`;
+};
+
+const formatBibtexEntry = (reference) => {
+    const authors = (reference?.authors || reference?.author || '').toString().replace(/\s*&\s*/g, ' and ');
+    const title = (reference?.title || '').toString();
+    const year = (reference?.year || '').toString();
+    const journal = (reference?.journal || reference?.source || '').toString();
+    const publisher = (reference?.publisher || '').toString();
+    const doi = (reference?.doi || '').toString();
+    const url = (reference?.url || reference?.link || reference?.files?.[0]?.url || '').toString();
+
+    const entryType = journal ? 'article' : 'misc';
+    const key = buildBibtexKey(reference);
+    const fields = [];
+    if (authors) fields.push(`  author = {${authors}}`);
+    if (title) fields.push(`  title = {${title}}`);
+    if (journal) fields.push(`  journal = {${journal}}`);
+    if (publisher) fields.push(`  publisher = {${publisher}}`);
+    if (year) fields.push(`  year = {${year}}`);
+    if (doi) fields.push(`  doi = {${doi}}`);
+    if (url) fields.push(`  url = {${url}}`);
+
+    return `@${entryType}{${key},\n${fields.join(',\n')}\n}`;
+};
 
 // GET /api/references/bibliography/export-docx - Export bibliography list as DOCX
 app.http('ExportBibliographyDocx', {
