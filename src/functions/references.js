@@ -2,10 +2,24 @@ const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const OpenAI = require('openai');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const SHORTLIST_ID = 'shortlist';
+const BIBLIOGRAPHY_FILTER_CLAUSE = 'c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
+const BIBLIOGRAPHY_EXPORT_QUERY = `SELECT c.id, c.authors, c.author, c.year, c.title, c.apa7, c.journal, c.source, c.publisher, c.doi, c.url, c.link, c.files FROM c WHERE ${BIBLIOGRAPHY_FILTER_CLAUSE}`;
+
+let openaiClient = null;
+
+const getOpenAiClient = () => {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return null;
+    if (!openaiClient) {
+        openaiClient = new OpenAI({ apiKey });
+    }
+    return openaiClient;
+};
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
 
@@ -155,7 +169,7 @@ app.http('ExportBibliographyPdf', {
             context.log('Exporting bibliography to PDF');
 
             const references = await queryItems(CONTAINER_NAME, {
-                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+                query: BIBLIOGRAPHY_EXPORT_QUERY
             });
 
             const sorted = sortBibliographyReferences(references);
@@ -174,7 +188,7 @@ app.http('ExportBibliographyPdf', {
             sorted.forEach(ref => {
                 const apa7 = (ref.apa7 || '').toString().trim();
                 const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
-                const text = stripApaFormatting(apa7 || fallback);
+                const text = sanitizePdfText(stripApaFormatting(apa7 || fallback));
                 const lines = wrapText(text, pageWidth - margin * 2, font, fontSize);
 
                 if (y - lines.length * lineHeight < margin) {
@@ -238,12 +252,16 @@ app.http('ExportBibliographyBibtex', {
         try {
             context.log('Exporting bibliography to BibTeX');
 
+            const enrichMode = (request?.query?.get('enrich') || 'auto').toLowerCase();
+            const useLlmEnrichment = enrichMode !== 'off';
+
             const references = await queryItems(CONTAINER_NAME, {
-                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+                query: BIBLIOGRAPHY_EXPORT_QUERY
             });
 
             const sorted = sortBibliographyReferences(references);
-            const entries = sorted.map(ref => formatBibtexEntry(ref));
+            const metadata = await enrichBibtexMetadataWithLlm(sorted, context, useLlmEnrichment);
+            const entries = sorted.map((ref, idx) => formatBibtexEntry(ref, metadata[idx]));
             const content = entries.length > 0 ? `${entries.join('\n\n')}\n` : '';
             const fileName = `bibliography_${new Date().toISOString().slice(0, 10)}.bib`;
 
@@ -453,6 +471,21 @@ const stripApaFormatting = (text) => (text || '')
     .replace(/\s+/g, ' ')
     .trim();
 
+const sanitizeDocxText = (text) => (text || '')
+    .toString()
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const sanitizePdfText = (text) => (text || '')
+    .toString()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, '');
+
 const wrapText = (text, maxWidth, font, fontSize) => {
     const words = (text || '').split(/\s+/).filter(Boolean);
     const lines = [];
@@ -479,14 +512,135 @@ const buildBibtexKey = (reference) => {
     return raw.replace(/[^a-z0-9]+/g, '').slice(0, 40) || `ref${Date.now()}`;
 };
 
-const formatBibtexEntry = (reference) => {
-    const authors = (reference?.authors || reference?.author || '').toString().replace(/\s*&\s*/g, ' and ');
-    const title = (reference?.title || '').toString();
-    const year = (reference?.year || '').toString();
-    const journal = (reference?.journal || reference?.source || '').toString();
-    const publisher = (reference?.publisher || '').toString();
-    const doi = (reference?.doi || '').toString();
-    const url = (reference?.url || reference?.link || reference?.files?.[0]?.url || '').toString();
+const cleanBibtexValue = (value) => (value || '')
+    .toString()
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/[{}]/g, '')
+    .trim();
+
+const parseBibtexNumericMetadata = (text) => {
+    const s = stripApaFormatting(text);
+
+    const volumeIssue = s.match(/\b(\d{1,4})\s*\(([^)]+)\)/);
+    const volumeOnly = s.match(/(?:^|,\s*)(\d{1,4})(?:\s*,|\s*$)/);
+    const pages = s.match(/\b(\d{1,5}\s*[-–]\s*\d{1,5})\b/);
+    const articleNumber = s.match(/\b(?:article|art\.?|e)\s*([a-z0-9\-]{3,})\b/i);
+
+    return {
+        volume: volumeIssue?.[1] || volumeOnly?.[1] || '',
+        number: volumeIssue?.[2]?.trim() || '',
+        pages: pages?.[1]?.replace(/\s+/g, '') || '',
+        eid: articleNumber?.[1] || ''
+    };
+};
+
+const inferJournalFromApa = (reference) => {
+    const preferred = cleanBibtexValue(reference?.journal || reference?.source || '');
+    if (preferred) return preferred;
+
+    const apa = stripApaFormatting(reference?.apa7 || '');
+    const yearSplit = apa.split(/\(\d{4}[a-z]?\)\./i);
+    if (yearSplit.length < 2) return '';
+
+    const afterYear = yearSplit.slice(1).join(' ').trim();
+    const firstPeriod = afterYear.indexOf('.');
+    if (firstPeriod === -1) return '';
+    const afterTitle = afterYear.slice(firstPeriod + 1).trim();
+    if (!afterTitle) return '';
+
+    const candidate = afterTitle.split(',')[0].trim();
+    return cleanBibtexValue(candidate.replace(/https?:\/\/\S+$/i, '').trim());
+};
+
+const getBibtexHeuristics = (reference) => {
+    const numeric = parseBibtexNumericMetadata(reference?.apa7 || '');
+    return {
+        journal: inferJournalFromApa(reference),
+        volume: cleanBibtexValue(reference?.volume || numeric.volume),
+        number: cleanBibtexValue(reference?.number || numeric.number),
+        pages: cleanBibtexValue(reference?.pages || numeric.pages),
+        eid: cleanBibtexValue(reference?.eid || reference?.articleNumber || numeric.eid)
+    };
+};
+
+const enrichBibtexMetadataWithLlm = async (references, context, enabled) => {
+    const heuristics = references.map(getBibtexHeuristics);
+    if (!enabled || references.length === 0) return heuristics;
+
+    const client = getOpenAiClient();
+    if (!client) return heuristics;
+
+    const limit = Number(process.env.BIBTEX_LLM_ENRICH_LIMIT || 60);
+    const candidates = references
+        .map((ref, idx) => ({
+            idx,
+            title: (ref?.title || '').toString(),
+            apa7: (ref?.apa7 || '').toString(),
+            source: (ref?.source || ref?.journal || '').toString(),
+            needs: !(heuristics[idx].volume && (heuristics[idx].pages || heuristics[idx].eid))
+        }))
+        .filter(item => item.needs)
+        .slice(0, limit)
+        .map(({ idx, title, apa7, source }) => ({ idx, title, apa7, source }));
+
+    if (candidates.length === 0) return heuristics;
+
+    try {
+        const completion = await client.chat.completions.create({
+            model: process.env.BIBTEX_LLM_MODEL || 'gpt-4o-mini',
+            temperature: 0,
+            response_format: { type: 'json_object' },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You extract bibliographic fields from citations. Return only valid JSON.'
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        task: 'For each item, infer journal, volume, number(issue), pages, and eid/article number if present. Use best-effort guesses.',
+                        outputSchema: { items: [{ idx: 0, journal: '', volume: '', number: '', pages: '', eid: '' }] },
+                        items: candidates
+                    })
+                }
+            ]
+        });
+
+        const parsed = JSON.parse(completion?.choices?.[0]?.message?.content || '{}');
+        const items = Array.isArray(parsed?.items) ? parsed.items : [];
+        items.forEach(item => {
+            const idx = Number(item?.idx);
+            if (!Number.isInteger(idx) || idx < 0 || idx >= heuristics.length) return;
+
+            const current = heuristics[idx];
+            heuristics[idx] = {
+                journal: current.journal || cleanBibtexValue(item.journal),
+                volume: current.volume || cleanBibtexValue(item.volume),
+                number: current.number || cleanBibtexValue(item.number),
+                pages: current.pages || cleanBibtexValue(item.pages),
+                eid: current.eid || cleanBibtexValue(item.eid)
+            };
+        });
+    } catch (error) {
+        context?.warn('BibTeX LLM enrichment failed, falling back to heuristics:', error.message);
+    }
+
+    return heuristics;
+};
+
+const formatBibtexEntry = (reference, metadata = {}) => {
+    const authors = cleanBibtexValue((reference?.authors || reference?.author || '').toString().replace(/\s*&\s*/g, ' and '));
+    const title = cleanBibtexValue(reference?.title || '');
+    const year = cleanBibtexValue(reference?.year || '');
+    const journal = cleanBibtexValue(metadata?.journal || reference?.journal || reference?.source || '');
+    const publisher = cleanBibtexValue(reference?.publisher || '');
+    const doi = cleanBibtexValue(reference?.doi || '');
+    const url = cleanBibtexValue(reference?.url || reference?.link || reference?.files?.[0]?.url || '');
+    const volume = cleanBibtexValue(metadata?.volume || reference?.volume || '');
+    const number = cleanBibtexValue(metadata?.number || reference?.number || '');
+    const pages = cleanBibtexValue(metadata?.pages || reference?.pages || '');
+    const eid = cleanBibtexValue(metadata?.eid || reference?.eid || reference?.articleNumber || '');
 
     const entryType = journal ? 'article' : 'misc';
     const key = buildBibtexKey(reference);
@@ -496,6 +650,10 @@ const formatBibtexEntry = (reference) => {
     if (journal) fields.push(`  journal = {${journal}}`);
     if (publisher) fields.push(`  publisher = {${publisher}}`);
     if (year) fields.push(`  year = {${year}}`);
+    if (volume) fields.push(`  volume = {${volume}}`);
+    if (number) fields.push(`  number = {${number}}`);
+    if (pages) fields.push(`  pages = {${pages}}`);
+    if (eid) fields.push(`  eid = {${eid}}`);
     if (doi) fields.push(`  doi = {${doi}}`);
     if (url) fields.push(`  url = {${url}}`);
 
@@ -512,7 +670,7 @@ app.http('ExportBibliographyDocx', {
             context.log('Exporting bibliography to DOCX');
 
             const references = await queryItems(CONTAINER_NAME, {
-                query: 'SELECT * FROM c WHERE c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)'
+                query: BIBLIOGRAPHY_EXPORT_QUERY
             });
 
             const sorted = sortBibliographyReferences(references);
@@ -520,7 +678,7 @@ app.http('ExportBibliographyDocx', {
             const paragraphs = sorted.map(ref => {
                 const apa7 = (ref.apa7 || '').toString().trim();
                 const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
-                const text = apa7 || fallback;
+                const text = sanitizeDocxText(apa7 || fallback);
 
                 return new Paragraph({
                     children: parseSimpleMarkdownRuns(text),
