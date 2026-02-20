@@ -554,6 +554,7 @@ app.http('GetDashboardAnalytics', {
                     current: snapshot.surveyResponses || 0,
                     weekChange: getWeekChangeFromHistory(history, 'surveyResponses', snapshot.surveyResponses)
                 },
+                history: history,
                 lastUpdated: snapshot.lastUpdated,
                 needsRefresh: isStale
             };
@@ -799,6 +800,7 @@ app.http('RefreshDashboardAnalytics', {
                         current: surveyResponses,
                         weekChange: getWeekChangeFromHistory(history, 'surveyResponses', surveyResponses)
                     },
+                    history: history,
                     lastUpdated: now,
                     needsRefresh: false
                 })
