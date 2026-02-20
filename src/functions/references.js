@@ -8,7 +8,7 @@ const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references'
 const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const SHORTLIST_ID = 'shortlist';
 const BIBLIOGRAPHY_FILTER_CLAUSE = 'c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
-const BIBLIOGRAPHY_EXPORT_QUERY = `SELECT c.id, c.authors, c.author, c.year, c.title, c.apa7, c.journal, c.source, c.publisher, c.doi, c.url, c.link, c.files FROM c WHERE ${BIBLIOGRAPHY_FILTER_CLAUSE}`;
+const BIBLIOGRAPHY_EXPORT_QUERY = `SELECT c.id, c.authors, c.author, c.year, c.title, c.apa7, c.journal, c.source, c.publisher, c.doi, c.url, c.link FROM c WHERE ${BIBLIOGRAPHY_FILTER_CLAUSE}`;
 
 let openaiClient = null;
 
@@ -19,6 +19,45 @@ const getOpenAiClient = () => {
         openaiClient = new OpenAI({ apiKey });
     }
     return openaiClient;
+};
+
+const wrapRichTextSegments = (segments, maxWidth, getFont, fontSize) => {
+    const lines = [];
+    let currentLine = [];
+    let currentWidth = 0;
+
+    const pushLine = () => {
+        if (currentLine.length === 0) return;
+        while (currentLine.length > 0 && /^\s+$/.test(currentLine[currentLine.length - 1].text)) {
+            currentLine.pop();
+        }
+        if (currentLine.length > 0) lines.push(currentLine);
+        currentLine = [];
+        currentWidth = 0;
+    };
+
+    segments.forEach(segment => {
+        const parts = (segment.text || '').split(/(\s+)/).filter(Boolean);
+        parts.forEach(part => {
+            const isWhitespace = /^\s+$/.test(part);
+            if (isWhitespace && currentLine.length === 0) return;
+
+            const font = getFont(segment);
+            const width = font.widthOfTextAtSize(part, fontSize);
+
+            if (!isWhitespace && currentLine.length > 0 && currentWidth + width > maxWidth) {
+                pushLine();
+            }
+
+            if (isWhitespace && currentLine.length === 0) return;
+
+            currentLine.push({ ...segment, text: part, font });
+            currentWidth += width;
+        });
+    });
+
+    pushLine();
+    return lines;
 };
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
@@ -176,33 +215,51 @@ app.http('ExportBibliographyPdf', {
 
             const pdfDoc = await PDFDocument.create();
             const font = await pdfDoc.embedFont(StandardFonts.TimesRoman);
+            const boldFont = await pdfDoc.embedFont(StandardFonts.TimesBold);
+            const italicFont = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
+            const boldItalicFont = await pdfDoc.embedFont(StandardFonts.TimesBoldItalic);
             const fontSize = 12;
             const lineHeight = 16;
             const margin = 54;
+            const hangingIndent = 24;
             const pageWidth = 612;
             const pageHeight = 792;
 
             let page = pdfDoc.addPage([pageWidth, pageHeight]);
             let y = pageHeight - margin;
 
+            const getFontForSegment = (segment) => {
+                if (segment.bold && segment.italics) return boldItalicFont;
+                if (segment.bold) return boldFont;
+                if (segment.italics) return italicFont;
+                return font;
+            };
+
             sorted.forEach(ref => {
                 const apa7 = (ref.apa7 || '').toString().trim();
                 const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
-                const text = sanitizePdfText(stripApaFormatting(apa7 || fallback));
-                const lines = wrapText(text, pageWidth - margin * 2, font, fontSize);
+                const sourceText = stripApaHtml(apa7 || fallback);
+                const segments = parseSimpleMarkdownSegments(sourceText)
+                    .map(segment => ({ ...segment, text: sanitizePdfText(segment.text) }))
+                    .filter(segment => segment.text);
+                const lines = wrapRichTextSegments(segments, pageWidth - margin * 2 - hangingIndent, getFontForSegment, fontSize);
 
                 if (y - lines.length * lineHeight < margin) {
                     page = pdfDoc.addPage([pageWidth, pageHeight]);
                     y = pageHeight - margin;
                 }
 
-                lines.forEach(line => {
-                    page.drawText(line, {
-                        x: margin,
-                        y,
-                        size: fontSize,
-                        font,
-                        color: rgb(0.1, 0.1, 0.1)
+                lines.forEach((line, lineIdx) => {
+                    let x = margin + (lineIdx === 0 ? 0 : hangingIndent);
+                    line.forEach(run => {
+                        page.drawText(run.text, {
+                            x,
+                            y,
+                            size: fontSize,
+                            font: run.font || font,
+                            color: rgb(0.1, 0.1, 0.1)
+                        });
+                        x += (run.font || font).widthOfTextAtSize(run.text, fontSize);
                     });
                     y -= lineHeight;
                 });
@@ -409,18 +466,27 @@ app.http('GetBibliography', {
 });
 
 function parseSimpleMarkdownRuns(text) {
+    return parseSimpleMarkdownSegments(text).map(segment => new TextRun({
+        text: segment.text,
+        font: 'Times New Roman',
+        size: 22,
+        bold: !!segment.bold,
+        italics: !!segment.italics
+    }));
+}
+
+function parseSimpleMarkdownSegments(text) {
     const s = (text || '').toString();
-    const runs = [];
+    const segments = [];
     let i = 0;
 
-    const pushRun = (value, opts) => {
+    const pushSegment = (value, opts) => {
         if (!value) return;
-        runs.push(new TextRun({
+        segments.push({
             text: value,
-            font: 'Times New Roman',
-            size: 22,
-            ...opts
-        }));
+            bold: !!opts?.bold,
+            italics: !!opts?.italics
+        });
     };
 
     while (i < s.length) {
@@ -430,7 +496,7 @@ function parseSimpleMarkdownRuns(text) {
         if (isBold) {
             const end = s.indexOf('**', i + 2);
             if (end !== -1) {
-                pushRun(s.slice(i + 2, end), { bold: true });
+                pushSegment(s.slice(i + 2, end), { bold: true });
                 i = end + 2;
                 continue;
             }
@@ -439,7 +505,7 @@ function parseSimpleMarkdownRuns(text) {
         if (isItalic) {
             const end = s.indexOf('*', i + 1);
             if (end !== -1) {
-                pushRun(s.slice(i + 1, end), { italics: true });
+                pushSegment(s.slice(i + 1, end), { italics: true });
                 i = end + 1;
                 continue;
             }
@@ -452,15 +518,15 @@ function parseSimpleMarkdownRuns(text) {
         else next = nextBold !== -1 ? nextBold : nextItalic;
 
         if (next === -1) {
-            pushRun(s.slice(i), {});
+            pushSegment(s.slice(i), {});
             break;
         }
 
-        pushRun(s.slice(i, next), {});
+        pushSegment(s.slice(i, next), {});
         i = next;
     }
 
-    return runs;
+    return segments;
 }
 
 const stripApaFormatting = (text) => (text || '')
@@ -468,6 +534,12 @@ const stripApaFormatting = (text) => (text || '')
     .replace(/<[^>]+>/g, ' ')
     .replace(/\*\*/g, '')
     .replace(/\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const stripApaHtml = (text) => (text || '')
+    .toString()
+    .replace(/<[^>]+>/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -636,7 +708,7 @@ const formatBibtexEntry = (reference, metadata = {}) => {
     const journal = cleanBibtexValue(metadata?.journal || reference?.journal || reference?.source || '');
     const publisher = cleanBibtexValue(reference?.publisher || '');
     const doi = cleanBibtexValue(reference?.doi || '');
-    const url = cleanBibtexValue(reference?.url || reference?.link || reference?.files?.[0]?.url || '');
+    const url = cleanBibtexValue(reference?.url || reference?.link || '');
     const volume = cleanBibtexValue(metadata?.volume || reference?.volume || '');
     const number = cleanBibtexValue(metadata?.number || reference?.number || '');
     const pages = cleanBibtexValue(metadata?.pages || reference?.pages || '');
