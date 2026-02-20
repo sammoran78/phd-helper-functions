@@ -9,6 +9,7 @@ const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analyti
 const SHORTLIST_ID = 'shortlist';
 const BIBLIOGRAPHY_FILTER_CLAUSE = 'c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
 const BIBLIOGRAPHY_EXPORT_QUERY = `SELECT c.id, c.authors, c.author, c.year, c.title, c.apa7, c.journal, c.source, c.publisher, c.doi, c.url, c.link FROM c WHERE ${BIBLIOGRAPHY_FILTER_CLAUSE}`;
+const DOCX_EXPORT_MAX_ITEMS = Number(process.env.BIBLIOGRAPHY_DOCX_MAX_ITEMS || 400);
 
 let openaiClient = null;
 
@@ -215,9 +216,9 @@ app.http('ExportBibliographyPdf', {
 
             const pdfDoc = await PDFDocument.create();
             const font = await pdfDoc.embedFont(StandardFonts.TimesRoman);
-            const boldFont = await pdfDoc.embedFont(StandardFonts.TimesBold);
+            const boldFont = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
             const italicFont = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
-            const boldItalicFont = await pdfDoc.embedFont(StandardFonts.TimesBoldItalic);
+            const boldItalicFont = await pdfDoc.embedFont(StandardFonts.TimesRomanBoldItalic);
             const fontSize = 12;
             const lineHeight = 16;
             const margin = 54;
@@ -236,9 +237,7 @@ app.http('ExportBibliographyPdf', {
             };
 
             sorted.forEach(ref => {
-                const apa7 = (ref.apa7 || '').toString().trim();
-                const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
-                const sourceText = stripApaHtml(apa7 || fallback);
+                const sourceText = buildExportCitationText(ref, { useHtmlStrip: true, maxChars: 1800 });
                 const segments = parseSimpleMarkdownSegments(sourceText)
                     .map(segment => ({ ...segment, text: sanitizePdfText(segment.text) }))
                     .filter(segment => segment.text);
@@ -558,6 +557,25 @@ const sanitizePdfText = (text) => (text || '')
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[^\x20-\x7E\xA0-\xFF]/g, '');
 
+const buildExportCitationText = (reference, options = {}) => {
+    const maxChars = Number(options.maxChars || 1800);
+    const useHtmlStrip = !!options.useHtmlStrip;
+    const useMarkdownStrip = !!options.useMarkdownStrip;
+
+    const apa7 = (reference?.apa7 || '').toString().trim();
+    const fallback = `${reference?.authors || reference?.author || 'Unknown Author'} (${reference?.year || 'n.d.'}). ${reference?.title || 'Untitled'}.`;
+    let text = apa7 || fallback;
+
+    if (useHtmlStrip) text = stripApaHtml(text);
+    if (useMarkdownStrip) text = stripApaFormatting(text);
+
+    text = (text || '').toString().replace(/\s+/g, ' ').trim();
+    if (text.length > maxChars) {
+        text = `${text.slice(0, maxChars)}…`;
+    }
+    return text;
+};
+
 const wrapText = (text, maxWidth, font, fontSize) => {
     const words = (text || '').split(/\s+/).filter(Boolean);
     const lines = [];
@@ -746,11 +764,11 @@ app.http('ExportBibliographyDocx', {
             });
 
             const sorted = sortBibliographyReferences(references);
+            const limited = sorted.slice(0, DOCX_EXPORT_MAX_ITEMS);
+            const wasTruncated = sorted.length > limited.length;
 
-            const paragraphs = sorted.map(ref => {
-                const apa7 = (ref.apa7 || '').toString().trim();
-                const fallback = `${ref.authors || ref.author || 'Unknown Author'} (${ref.year || 'n.d.'}). ${ref.title || 'Untitled'}.`;
-                const text = sanitizeDocxText(apa7 || fallback);
+            const paragraphs = limited.map(ref => {
+                const text = sanitizeDocxText(buildExportCitationText(ref, { maxChars: 1000 }));
 
                 return new Paragraph({
                     children: parseSimpleMarkdownRuns(text),
@@ -758,6 +776,18 @@ app.http('ExportBibliographyDocx', {
                     spacing: { after: 240 }
                 });
             });
+
+            if (wasTruncated) {
+                paragraphs.push(new Paragraph({
+                    children: [new TextRun({
+                        text: `Export truncated to first ${limited.length} entries to avoid timeout.`,
+                        font: 'Times New Roman',
+                        size: 20,
+                        italics: true
+                    })],
+                    spacing: { before: 240 }
+                }));
+            }
 
             const doc = new Document({
                 sections: [
