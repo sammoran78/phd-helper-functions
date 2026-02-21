@@ -12,6 +12,10 @@ const WRITING_ANALYTICS_LATEST_ID = 'writing_analytics_latest';
 const LANDSCAPE_DOC_ID = 'analytics_landscape';
 const LANDSCAPE_TTL_MS = 24 * 60 * 60 * 1000;
 const COFFEE_COUNTER_DOC_ID = 'coffee_counter';
+const LANDSCAPE_SCOPE = 'kb_status_3_only';
+const KB_REFERENCE_FILTER_CLAUSE = 'c.ref_knowledge_status = 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
+const LANDSCAPE_REFERENCE_QUERY = `SELECT c.id, c.title, c.authors, c.year, c.source, c.tags, c.keywords, c.discipline, c.frameworks, c.concepts, c.summary, c.design, c.analysis, c.apa7, c.journal, c.publisher, c.abstract FROM c WHERE ${KB_REFERENCE_FILTER_CLAUSE}`;
+const ANALYTICS_REFERENCE_QUERY = `SELECT * FROM c WHERE ${KB_REFERENCE_FILTER_CLAUSE}`;
 
 const isLandscapeStale = (dateGenerated) => {
     if (!dateGenerated) return true;
@@ -26,27 +30,33 @@ const toLandscapeReference = (ref) => ({
     authors: ref.authors,
     year: ref.year,
     source: ref.source,
+    journal: ref.journal,
+    publisher: ref.publisher,
     tags: ref.tags,
     keywords: ref.keywords,
     discipline: ref.discipline,
     frameworks: ref.frameworks,
     concepts: ref.concepts,
-    summary: ref.summary
+    summary: ref.summary,
+    design: ref.design,
+    analysis: ref.analysis,
+    apa7: ref.apa7,
+    abstract: ref.abstract
 });
 
 const buildLandscapeSnapshot = async (context) => {
-    const query = 'SELECT * FROM c WHERE NOT IS_DEFINED(c.dismissed) OR c.dismissed != true';
-    const references = await queryItems(REFERENCES_CONTAINER, { query });
+    const references = await queryItems(REFERENCES_CONTAINER, { query: LANDSCAPE_REFERENCE_QUERY });
     const snapshot = {
         id: LANDSCAPE_DOC_ID,
         type: 'landscape',
+        scope: LANDSCAPE_SCOPE,
         dateGenerated: new Date().toISOString(),
         referenceCount: references.length,
         references: references.map(toLandscapeReference)
     };
 
     await upsertItem(CONTAINER_NAME, snapshot);
-    context?.log(`Saved analytics landscape snapshot with ${references.length} references`);
+    context?.log(`Saved analytics landscape snapshot with ${references.length} references (scope: ${LANDSCAPE_SCOPE})`);
     return snapshot;
 };
 
@@ -154,8 +164,9 @@ app.http('GetAnalyticsLandscape', {
             const forceRefresh = refreshParam === 'true' || refreshParam === '1';
 
             let snapshot = await getItem(CONTAINER_NAME, LANDSCAPE_DOC_ID, LANDSCAPE_DOC_ID);
+            const scopeMismatch = snapshot?.scope !== LANDSCAPE_SCOPE;
 
-            if (!snapshot || forceRefresh || isLandscapeStale(snapshot.dateGenerated)) {
+            if (!snapshot || forceRefresh || scopeMismatch || isLandscapeStale(snapshot.dateGenerated)) {
                 snapshot = await buildLandscapeSnapshot(context);
             }
 
@@ -184,7 +195,8 @@ app.http('GetAnalytics', {
         try {
             // Query for the most recent analytics record
             const querySpec = {
-                query: 'SELECT * FROM c WHERE c.type = "corpus_analysis" ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1'
+                query: 'SELECT * FROM c WHERE c.type = "corpus_analysis" AND c.scope = @scope ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1',
+                parameters: [{ name: '@scope', value: LANDSCAPE_SCOPE }]
             };
             const results = await queryItems(CONTAINER_NAME, querySpec);
             
@@ -259,8 +271,8 @@ app.http('AnalyzeCorpus', {
     route: 'analytics/analyze',
     handler: async (request, context) => {
         try {
-            // Get all references from CosmosDB
-            const references = await queryItems(REFERENCES_CONTAINER, 'SELECT * FROM c');
+            // Analyze only references that are in the RAG knowledge base (status 3)
+            const references = await queryItems(REFERENCES_CONTAINER, { query: ANALYTICS_REFERENCE_QUERY });
             
             context.log(`Analyzing ${references.length} references`);
             
@@ -416,6 +428,7 @@ app.http('AnalyzeCorpus', {
             const analysis = {
                 id: `analytics_${Date.now()}`,
                 type: 'corpus_analysis',
+                scope: LANDSCAPE_SCOPE,
                 dateGenerated: new Date().toISOString(),
                 timestamp: new Date().toISOString(),
                 referenceCount: references.length,
