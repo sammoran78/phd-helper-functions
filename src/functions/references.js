@@ -499,6 +499,11 @@ function parseSimpleMarkdownSegments(text) {
                 i = end + 2;
                 continue;
             }
+
+            // Unmatched bold marker: treat as literal to ensure forward progress
+            pushSegment('**', {});
+            i += 2;
+            continue;
         }
 
         if (isItalic) {
@@ -508,6 +513,11 @@ function parseSimpleMarkdownSegments(text) {
                 i = end + 1;
                 continue;
             }
+
+            // Unmatched italic marker: treat as literal to ensure forward progress
+            pushSegment('*', {});
+            i += 1;
+            continue;
         }
 
         const nextBold = s.indexOf('**', i);
@@ -519,6 +529,13 @@ function parseSimpleMarkdownSegments(text) {
         if (next === -1) {
             pushSegment(s.slice(i), {});
             break;
+        }
+
+        if (next <= i) {
+            // Safety guard against non-advancing cursor on malformed marker patterns
+            pushSegment(s.charAt(i), {});
+            i += 1;
+            continue;
         }
 
         pushSegment(s.slice(i, next), {});
