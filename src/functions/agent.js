@@ -92,6 +92,12 @@ function parseHeader(headers, name) {
     return (found?.value || '').toString();
 }
 
+function toSafeIdPart(value) {
+    const raw = (value || '').toString().trim();
+    if (!raw) return '';
+    return raw.replace(/[\\/?#]/g, '_');
+}
+
 function inferTaskTitle(subject, snippet) {
     const text = `${subject} ${snippet}`.toLowerCase();
     const shortSubject = truncate(subject || 'Inbox item', 72);
@@ -123,7 +129,9 @@ async function upsertTaskFromMessage(messageDetail) {
 
     if (!sourceMessageId) return null;
 
-    const docId = `agent_task_${sourceMessageId}`;
+    const safeMessageId = toSafeIdPart(sourceMessageId);
+    if (!safeMessageId) return null;
+    const docId = `agent_task_${safeMessageId}`;
     const existing = await getItem(ANALYTICS_CONTAINER, docId, docId);
 
     if (existing?.status && existing.status !== 'open') {
@@ -347,15 +355,22 @@ app.http('ScanAgentEmailInbox', {
 
             let createdOrUpdated = 0;
             for (const message of messages) {
-                const detailRes = await gmail.users.messages.get({
-                    userId: 'me',
-                    id: message.id,
-                    format: 'metadata',
-                    metadataHeaders: ['Subject', 'From', 'Date']
-                });
+                try {
+                    const detailRes = await gmail.users.messages.get({
+                        userId: 'me',
+                        id: message.id,
+                        format: 'metadata',
+                        metadataHeaders: ['Subject', 'From', 'Date']
+                    });
 
-                const taskDoc = await upsertTaskFromMessage(detailRes?.data);
-                if (taskDoc) createdOrUpdated += 1;
+                    const taskDoc = await upsertTaskFromMessage(detailRes?.data);
+                    if (taskDoc) createdOrUpdated += 1;
+                } catch (messageError) {
+                    context.warn('[AgentEmail] skipped message during scan', {
+                        messageId: message?.id || null,
+                        error: messageError?.message || 'Unknown error'
+                    });
+                }
             }
 
             const tasks = await getOpenTasks(12);
