@@ -1,5 +1,6 @@
 const { app } = require('@azure/functions');
 const { google } = require('googleapis');
+const OpenAI = require('openai');
 const { getItem, queryItems, upsertItem, replaceItem } = require('../../shared/cosmosClient');
 
 const ANALYTICS_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
@@ -15,12 +16,112 @@ const AGENT_GMAIL_SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly'
 ];
 
+let agentOpenAiClient = null;
+
 function toJsonResponse(status, payload) {
     return {
         status,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     };
+}
+
+function clampConfidence(value) {
+    const n = Number.parseFloat(value);
+    if (!Number.isFinite(n)) return null;
+    if (n < 0) return 0;
+    if (n > 1) return 1;
+    return n;
+}
+
+function normalizePriority(value) {
+    const v = (value || '').toString().trim().toLowerCase();
+    if (v === 'high' || v === 'medium' || v === 'low') return v;
+    return 'medium';
+}
+
+function getAgentOpenAiClient() {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return null;
+    if (!agentOpenAiClient) {
+        agentOpenAiClient = new OpenAI({ apiKey });
+    }
+    return agentOpenAiClient;
+}
+
+async function synthesizeEmailTasks(messageSignals, context) {
+    if (!Array.isArray(messageSignals) || messageSignals.length === 0) return [];
+
+    const client = getAgentOpenAiClient();
+    if (!client) return [];
+
+    const model = (process.env.AGENT_EMAIL_LLM_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini').toString().trim();
+    if (!model) return [];
+
+    const trimmedSignals = messageSignals.slice(0, 20).map((signal) => ({
+        sourceMessageId: signal.sourceMessageId,
+        subject: signal.subject,
+        from: signal.from,
+        date: signal.date,
+        snippet: truncate(signal.snippet, 260)
+    }));
+
+    try {
+        const completion = await client.chat.completions.create({
+            model,
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a PhD productivity supervisor. Generate concise actionable tasks from inbox signals. Return strict JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        task: 'Rank signals and return up to 3 actionable tasks with rationale and confidence.',
+                        constraints: {
+                            maxTasks: 3,
+                            confidenceRange: '0-1',
+                            priorities: ['high', 'medium', 'low']
+                        },
+                        outputSchema: {
+                            tasks: [
+                                {
+                                    sourceMessageId: 'gmail message id',
+                                    title: 'short action title',
+                                    desc: 'single sentence action-oriented description',
+                                    rationale: 'why this matters now',
+                                    confidence: 0.75,
+                                    priority: 'high'
+                                }
+                            ]
+                        },
+                        signals: trimmedSignals
+                    })
+                }
+            ]
+        });
+
+        const payload = JSON.parse(completion?.choices?.[0]?.message?.content || '{}');
+        const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+
+        return tasks
+            .map((item) => ({
+                sourceMessageId: (item?.sourceMessageId || '').toString().trim(),
+                title: truncate(item?.title || '', 72),
+                desc: truncate(item?.desc || '', 220),
+                rationale: truncate(item?.rationale || '', 220),
+                confidence: clampConfidence(item?.confidence),
+                priority: normalizePriority(item?.priority)
+            }))
+            .filter((item) => item.sourceMessageId);
+    } catch (error) {
+        context?.warn('[AgentEmail] synthesis failed, falling back to rule-based tasks', {
+            error: error?.message || 'Unknown error'
+        });
+        return [];
+    }
 }
 
 function getAgentOAuthConfig() {
@@ -117,7 +218,7 @@ function inferTaskTitle(subject, snippet) {
     return `Process email: ${shortSubject}`;
 }
 
-async function upsertTaskFromMessage(messageDetail) {
+async function upsertTaskFromMessage(messageDetail, synthesis = null) {
     const payload = messageDetail?.payload || {};
     const headers = payload.headers || [];
 
@@ -139,8 +240,8 @@ async function upsertTaskFromMessage(messageDetail) {
     }
 
     const nowIso = new Date().toISOString();
-    const title = inferTaskTitle(subject, snippet);
-    const desc = `From ${truncate(from, 80)} — ${truncate(snippet || subject, 220)}`;
+    const title = synthesis?.title || inferTaskTitle(subject, snippet);
+    const desc = synthesis?.desc || `From ${truncate(from, 80)} — ${truncate(snippet || subject, 220)}`;
 
     const taskDoc = {
         id: docId,
@@ -150,6 +251,9 @@ async function upsertTaskFromMessage(messageDetail) {
         sourceMessageId,
         title,
         desc,
+        rationale: synthesis?.rationale || existing?.rationale || '',
+        confidence: synthesis?.confidence ?? existing?.confidence ?? null,
+        priority: synthesis?.priority || existing?.priority || 'medium',
         evidence: {
             subject,
             from,
@@ -168,7 +272,7 @@ async function upsertTaskFromMessage(messageDetail) {
 async function getOpenTasks(limit = 12) {
     const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 12;
     const results = await queryItems(ANALYTICS_CONTAINER, {
-        query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = "open"'
+        query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.priority, c.confidence, c.rationale, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = "open"'
     });
     const list = Array.isArray(results) ? results : [];
     return list
@@ -359,9 +463,8 @@ app.http('ScanAgentEmailInbox', {
 
             const messages = Array.isArray(listRes?.data?.messages) ? listRes.data.messages : [];
 
-            let createdOrUpdated = 0;
-            const scannedOpenTasks = [];
-            stage = 'process_messages';
+            stage = 'fetch_message_details';
+            const messageDetails = [];
             for (const message of messages) {
                 try {
                     const detailRes = await gmail.users.messages.get({
@@ -370,15 +473,51 @@ app.http('ScanAgentEmailInbox', {
                         format: 'metadata',
                         metadataHeaders: ['Subject', 'From', 'Date']
                     });
+                    if (detailRes?.data?.id) {
+                        messageDetails.push(detailRes.data);
+                    }
+                } catch (messageError) {
+                    context.warn('[AgentEmail] skipped message detail fetch', {
+                        messageId: message?.id || null,
+                        error: messageError?.message || 'Unknown error'
+                    });
+                }
+            }
 
-                    const taskDoc = await upsertTaskFromMessage(detailRes?.data);
+            stage = 'synthesize_tasks';
+            const synthesis = await synthesizeEmailTasks(
+                messageDetails.map((detail) => {
+                    const headers = detail?.payload?.headers || [];
+                    return {
+                        sourceMessageId: detail?.id,
+                        subject: parseHeader(headers, 'Subject') || 'No subject',
+                        from: parseHeader(headers, 'From') || 'Unknown sender',
+                        date: parseHeader(headers, 'Date') || null,
+                        snippet: (detail?.snippet || '').trim()
+                    };
+                }),
+                context
+            );
+            const synthesisByMessageId = new Map(
+                synthesis.map((item) => [item.sourceMessageId, item])
+            );
+
+            let createdOrUpdated = 0;
+            const scannedOpenTasks = [];
+            stage = 'process_messages';
+            for (const detail of messageDetails) {
+                try {
+                    const taskDoc = await upsertTaskFromMessage(
+                        detail,
+                        synthesisByMessageId.get(detail?.id) || null
+                    );
                     if (taskDoc?.status === 'open') {
                         createdOrUpdated += 1;
                         scannedOpenTasks.push(taskDoc);
                     }
                 } catch (messageError) {
                     context.warn('[AgentEmail] skipped message during scan', {
-                        messageId: message?.id || null,
+                        messageId: detail?.id || null,
                         error: messageError?.message || 'Unknown error'
                     });
                 }
@@ -450,7 +589,7 @@ app.http('GetAgentTasks', {
             const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
 
             const tasks = await queryItems(ANALYTICS_CONTAINER, {
-                query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = @status',
+                query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.priority, c.confidence, c.rationale, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = @status',
                 parameters: [{ name: '@status', value: status }]
             });
 

@@ -267,4 +267,4 @@ const API_BASE = '/api';
 6. ⬜ Set up CI/CD pipeline (GitHub Actions)
 7. ⬜ Add monitoring and Application Insights
 
-Testinfg the updates
+Testinfg the updatesctly.
