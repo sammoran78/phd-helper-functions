@@ -135,7 +135,7 @@ async function upsertTaskFromMessage(messageDetail) {
     const existing = await getItem(ANALYTICS_CONTAINER, docId, docId);
 
     if (existing?.status && existing.status !== 'open') {
-        return existing;
+        return null;
     }
 
     const nowIso = new Date().toISOString();
@@ -360,6 +360,7 @@ app.http('ScanAgentEmailInbox', {
             const messages = Array.isArray(listRes?.data?.messages) ? listRes.data.messages : [];
 
             let createdOrUpdated = 0;
+            const scannedOpenTasks = [];
             stage = 'process_messages';
             for (const message of messages) {
                 try {
@@ -371,7 +372,10 @@ app.http('ScanAgentEmailInbox', {
                     });
 
                     const taskDoc = await upsertTaskFromMessage(detailRes?.data);
-                    if (taskDoc) createdOrUpdated += 1;
+                    if (taskDoc?.status === 'open') {
+                        createdOrUpdated += 1;
+                        scannedOpenTasks.push(taskDoc);
+                    }
                 } catch (messageError) {
                     context.warn('[AgentEmail] skipped message during scan', {
                         messageId: message?.id || null,
@@ -389,6 +393,16 @@ app.http('ScanAgentEmailInbox', {
                     error: tasksError?.message || 'Unknown error'
                 });
                 tasks = [];
+            }
+
+            if (tasks.length === 0 && scannedOpenTasks.length > 0) {
+                const deduped = new Map();
+                for (const task of scannedOpenTasks) {
+                    if (task?.id) deduped.set(task.id, task);
+                }
+                tasks = Array.from(deduped.values())
+                    .sort((a, b) => (new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime()))
+                    .slice(0, 12);
             }
 
             stage = 'save_scan_metadata';
