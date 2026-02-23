@@ -29,6 +29,205 @@ function toJsonResponse(status, payload) {
     };
 }
 
+function fallbackWeeklyPlanningBrief(openTasks, plannerTasks, upcomingEvents, analyticsSnapshot) {
+    const openEmail = Array.isArray(openTasks) ? openTasks : [];
+    const openPlanner = Array.isArray(plannerTasks) ? plannerTasks : [];
+    const events = Array.isArray(upcomingEvents) ? upcomingEvents : [];
+
+    const now = Date.now();
+    const next7d = now + (7 * 24 * 60 * 60 * 1000);
+
+    const weekPlanner = openPlanner
+        .filter((task) => {
+            const dueMs = parseDateMs(task?.dueDate);
+            return dueMs > 0 && dueMs <= next7d;
+        })
+        .slice(0, 6);
+
+    const weekEvents = events
+        .filter((event) => {
+            const eventMs = parseDateMs(event?.start);
+            return eventMs > 0 && eventMs <= next7d;
+        })
+        .slice(0, 6);
+
+    const highEmail = openEmail
+        .filter((task) => normalizePriority(task?.priority) === 'high')
+        .slice(0, 4);
+
+    const weeklyPriorities = [];
+    if (weekPlanner.length > 0) {
+        const topPlanner = weekPlanner[0];
+        weeklyPriorities.push({
+            title: `Lock planner-critical work: ${truncate(topPlanner?.title || 'Top planner task', 80)}`,
+            reason: `${weekPlanner.length} planner task(s) are due this week; reserve protected blocks early and close deadline-linked items first.`
+        });
+    }
+
+    if (highEmail.length > 0) {
+        const topEmail = highEmail[0];
+        weeklyPriorities.push({
+            title: `Triage high-priority inbox load: ${truncate(topEmail?.title || 'Inbox priority item', 80)}`,
+            reason: `${highEmail.length} high-priority inbox task(s) remain open; clear decision-heavy items before mid-week context switching compounds.`
+        });
+    }
+
+    if (weekEvents.length > 0) {
+        const topEvent = weekEvents[0];
+        weeklyPriorities.push({
+            title: `Pre-prepare for key events: ${truncate(topEvent?.title || 'Upcoming event', 80)}`,
+            reason: `${weekEvents.length} calendar event(s) land this week; attach deliverable prep to the preceding day to avoid reactive work.`
+        });
+    }
+
+    if (weeklyPriorities.length === 0) {
+        weeklyPriorities.push({
+            title: 'Create a focused weekly execution plan',
+            reason: 'No near-term hard constraints detected; convert strategic goals into 2-3 concrete deliverables and timebox execution blocks.'
+        });
+    }
+
+    const risks = [];
+    if (weekPlanner.length >= 3 && weekEvents.length >= 2) {
+        risks.push({
+            title: 'Overloaded weekly schedule',
+            reason: `${weekPlanner.length} planner deadlines and ${weekEvents.length} upcoming events create collision risk; de-scope non-critical tasks by mid-week.`
+        });
+    }
+
+    if (highEmail.length >= 2 && weekPlanner.length > 0) {
+        risks.push({
+            title: 'Inbox urgency may displace planned milestones',
+            reason: `${highEmail.length} high-priority inbox items can cannibalize time from planned deadlines unless protected planning blocks are enforced.`
+        });
+    }
+
+    const daysToMilestone = Number.parseInt(analyticsSnapshot?.daysToMilestone, 10);
+    if (Number.isFinite(daysToMilestone) && daysToMilestone > 0 && daysToMilestone <= 21) {
+        risks.push({
+            title: 'Milestone slippage window is narrowing',
+            reason: `Milestone "${analyticsSnapshot?.milestoneName || 'Upcoming milestone'}" is ${daysToMilestone} day(s) away; weekly output should bias toward milestone-critical tasks.`
+        });
+    }
+
+    const summary = risks.length > 0
+        ? `Weekly planning identified ${risks.length} risk area${risks.length > 1 ? 's' : ''}. Front-load planner deadlines, protect deep-work windows, and keep inbox triage bounded to avoid drift.`
+        : 'Weekly outlook is stable. Keep momentum by sequencing planner work early, handling inbox tasks in batches, and preparing ahead of scheduled events.';
+
+    return {
+        summary,
+        weeklyPriorities: weeklyPriorities.slice(0, 3),
+        risks: risks.slice(0, 3),
+        generatedAt: new Date().toISOString(),
+        source: 'fallback',
+        signals: {
+            openEmailTasks: openEmail.length,
+            openPlannerTasks: openPlanner.length,
+            upcomingEvents: events.length,
+            plannerDueThisWeek: weekPlanner.length,
+            eventsThisWeek: weekEvents.length,
+            daysToMilestone: Number.isFinite(daysToMilestone) ? daysToMilestone : null,
+            milestoneName: analyticsSnapshot?.milestoneName || null
+        }
+    };
+}
+
+async function buildWeeklyPlanningBrief(openTasks, plannerTasks, upcomingEvents, analyticsSnapshot, context) {
+    const fallback = fallbackWeeklyPlanningBrief(openTasks, plannerTasks, upcomingEvents, analyticsSnapshot);
+
+    const client = getAgentOpenAiClient();
+    const model = (process.env.AGENT_EMAIL_LLM_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini').toString().trim();
+    if (!client || !model) {
+        return fallback;
+    }
+
+    try {
+        const completion = await client.chat.completions.create({
+            model,
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a PhD supervisor planning the upcoming week. Return strict JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        task: 'Produce a concise weekly planning summary with top priorities and slippage risks from inbox, planner, calendar, and milestone signals.',
+                        constraints: {
+                            maxPriorities: 3,
+                            maxRisks: 3,
+                            style: 'actionable and forecast-oriented'
+                        },
+                        outputSchema: {
+                            summary: '2-4 sentences',
+                            weeklyPriorities: [{ title: 'short title', reason: '1-2 sentence explanation' }],
+                            risks: [{ title: 'short title', reason: '1-2 sentence explanation' }]
+                        },
+                        inboxOpenTasks: (Array.isArray(openTasks) ? openTasks : []).slice(0, 10).map((task) => ({
+                            id: task.id,
+                            title: task.title,
+                            priority: normalizePriority(task.priority),
+                            confidence: task.confidence,
+                            createdAt: task.createdAt
+                        })),
+                        plannerOpenTasks: (Array.isArray(plannerTasks) ? plannerTasks : []).slice(0, 10).map((task) => ({
+                            id: task.id,
+                            title: task.title,
+                            status: task.status,
+                            priority: (task.priority || '').toString(),
+                            dueDate: task.dueDate,
+                            subProject: task.subProject || ''
+                        })),
+                        upcomingCalendarEvents: (Array.isArray(upcomingEvents) ? upcomingEvents : []).slice(0, 10).map((event) => ({
+                            id: event.id,
+                            title: event.title,
+                            start: event.start,
+                            isAllDay: event.isAllDay,
+                            projectName: event.projectName || ''
+                        })),
+                        analytics: {
+                            daysToMilestone: analyticsSnapshot?.daysToMilestone,
+                            milestoneName: analyticsSnapshot?.milestoneName || null,
+                            wordCount: analyticsSnapshot?.wordCount,
+                            wordCountTarget: analyticsSnapshot?.wordCountTarget
+                        }
+                    })
+                }
+            ]
+        });
+
+        const parsed = JSON.parse(completion?.choices?.[0]?.message?.content || '{}');
+        const summary = truncate((parsed?.summary || '').toString(), 520) || fallback.summary;
+
+        const normalizeBriefItems = (items) => (Array.isArray(items) ? items : [])
+            .map((item) => ({
+                title: truncate((item?.title || '').toString().trim(), 100),
+                reason: truncate((item?.reason || '').toString().trim(), 220)
+            }))
+            .filter((item) => item.title && item.reason)
+            .slice(0, 3);
+
+        const weeklyPriorities = normalizeBriefItems(parsed?.weeklyPriorities);
+        const risks = normalizeBriefItems(parsed?.risks);
+
+        return {
+            ...fallback,
+            summary,
+            weeklyPriorities: weeklyPriorities.length > 0 ? weeklyPriorities : fallback.weeklyPriorities,
+            risks: risks.length > 0 ? risks : fallback.risks,
+            generatedAt: new Date().toISOString(),
+            source: (weeklyPriorities.length > 0 || risks.length > 0) ? 'openai' : 'openai_fallback_lists'
+        };
+    } catch (error) {
+        context?.warn('[AgentWeekly] synthesis failed, using fallback', {
+            error: error?.message || 'Unknown error'
+        });
+        return fallback;
+    }
+}
+
 function parseDateMs(value) {
     const ms = new Date(value || 0).getTime();
     return Number.isFinite(ms) ? ms : 0;
@@ -1191,6 +1390,63 @@ app.http('GetAgentDependencyBrief', {
         } catch (error) {
             context.error('[AgentBrief] dependency brief error', error);
             return toJsonResponse(500, { error: 'Failed to build dependency brief', details: error.message });
+        }
+    }
+});
+
+app.http('GetAgentWeeklyBrief', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'agent/brief/weekly',
+    handler: async (_request, context) => {
+        try {
+            const [openTasksResult, plannerTasksResult, upcomingEventsResult, analyticsSnapshotResult] = await Promise.allSettled([
+                getOpenTasks(16),
+                getOpenPlannerTasks(30),
+                getUpcomingCalendarEvents(18, context),
+                getItem(ANALYTICS_CONTAINER, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID)
+            ]);
+
+            const openTasks = openTasksResult.status === 'fulfilled' ? openTasksResult.value : [];
+            const plannerTasks = plannerTasksResult.status === 'fulfilled' ? plannerTasksResult.value : [];
+            const upcomingEvents = upcomingEventsResult.status === 'fulfilled' ? upcomingEventsResult.value : [];
+            const analyticsSnapshot = analyticsSnapshotResult.status === 'fulfilled'
+                ? (analyticsSnapshotResult.value || {})
+                : {};
+
+            if (openTasksResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load open inbox tasks for weekly brief', {
+                    error: openTasksResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (plannerTasksResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load planner tasks for weekly brief', {
+                    error: plannerTasksResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (upcomingEventsResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load calendar events for weekly brief', {
+                    error: upcomingEventsResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (analyticsSnapshotResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load analytics snapshot for weekly brief', {
+                    error: analyticsSnapshotResult.reason?.message || 'Unknown error'
+                });
+            }
+
+            const brief = await buildWeeklyPlanningBrief(
+                openTasks,
+                plannerTasks,
+                upcomingEvents,
+                analyticsSnapshot,
+                context
+            );
+
+            return toJsonResponse(200, brief);
+        } catch (error) {
+            context.error('[AgentBrief] weekly brief error', error);
+            return toJsonResponse(500, { error: 'Failed to build weekly brief', details: error.message });
         }
     }
 });
