@@ -747,7 +747,7 @@ async function upsertTaskFromMessage(messageDetail, synthesis = null) {
 async function getOpenTasks(limit = 12) {
     const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 12;
     const results = await queryItems(ANALYTICS_CONTAINER, {
-        query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.priority, c.confidence, c.rationale, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = "open"'
+        query: 'SELECT * FROM c WHERE c.type = "agent_task" AND c.status = "open"'
     });
     const list = Array.isArray(results) ? results : [];
     return list
@@ -1075,7 +1075,7 @@ app.http('GetAgentTasks', {
             const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
 
             const tasks = await queryItems(ANALYTICS_CONTAINER, {
-                query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.priority, c.confidence, c.rationale, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = @status',
+                query: 'SELECT * FROM c WHERE c.type = "agent_task" AND c.status = @status',
                 parameters: [{ name: '@status', value: status }]
             });
 
@@ -1111,10 +1111,24 @@ app.http('GetAgentEndOfDayBrief', {
     route: 'agent/brief/eod',
     handler: async (_request, context) => {
         try {
-            const [openTasks, recentlyClosedTasks] = await Promise.all([
+            const [openTasksResult, recentlyClosedResult] = await Promise.allSettled([
                 getOpenTasks(12),
                 getRecentlyClosedTasks(12)
             ]);
+            const openTasks = openTasksResult.status === 'fulfilled' ? openTasksResult.value : [];
+            const recentlyClosedTasks = recentlyClosedResult.status === 'fulfilled' ? recentlyClosedResult.value : [];
+
+            if (openTasksResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load open tasks for eod brief', {
+                    error: openTasksResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (recentlyClosedResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load recently-closed tasks for eod brief', {
+                    error: recentlyClosedResult.reason?.message || 'Unknown error'
+                });
+            }
+
             const brief = await buildEndOfDayCarryover(openTasks, recentlyClosedTasks, context);
             return toJsonResponse(200, brief);
         } catch (error) {
@@ -1130,18 +1144,46 @@ app.http('GetAgentDependencyBrief', {
     route: 'agent/brief/dependencies',
     handler: async (_request, context) => {
         try {
-            const [openTasks, plannerTasks, upcomingEvents, analyticsSnapshot] = await Promise.all([
+            const [openTasksResult, plannerTasksResult, upcomingEventsResult, analyticsSnapshotResult] = await Promise.allSettled([
                 getOpenTasks(12),
                 getOpenPlannerTasks(24),
                 getUpcomingCalendarEvents(12, context),
                 getItem(ANALYTICS_CONTAINER, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID)
             ]);
 
+            const openTasks = openTasksResult.status === 'fulfilled' ? openTasksResult.value : [];
+            const plannerTasks = plannerTasksResult.status === 'fulfilled' ? plannerTasksResult.value : [];
+            const upcomingEvents = upcomingEventsResult.status === 'fulfilled' ? upcomingEventsResult.value : [];
+            const analyticsSnapshot = analyticsSnapshotResult.status === 'fulfilled'
+                ? (analyticsSnapshotResult.value || {})
+                : {};
+
+            if (openTasksResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load open inbox tasks for dependency brief', {
+                    error: openTasksResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (plannerTasksResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load planner tasks for dependency brief', {
+                    error: plannerTasksResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (upcomingEventsResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load calendar events for dependency brief', {
+                    error: upcomingEventsResult.reason?.message || 'Unknown error'
+                });
+            }
+            if (analyticsSnapshotResult.status !== 'fulfilled') {
+                context.warn('[AgentBrief] failed to load analytics snapshot for dependency brief', {
+                    error: analyticsSnapshotResult.reason?.message || 'Unknown error'
+                });
+            }
+
             const brief = await buildCrossSourceDependencyBrief(
                 openTasks,
                 plannerTasks,
                 upcomingEvents,
-                analyticsSnapshot || {},
+                analyticsSnapshot,
                 context
             );
 
