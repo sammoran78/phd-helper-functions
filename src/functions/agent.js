@@ -335,12 +335,15 @@ app.http('ScanAgentEmailInbox', {
     authLevel: 'anonymous',
     route: 'agent/email/scan',
     handler: async (_request, context) => {
+        let stage = 'init';
         try {
+            stage = 'authorize_gmail';
             const gmail = await getAuthorizedGmailClient();
             if (!gmail) {
                 return toJsonResponse(400, { error: 'Gmail is not connected. Connect OAuth first.' });
             }
 
+            stage = 'list_messages';
             const maxResults = Number.isFinite(DEFAULT_EMAIL_MAX_MESSAGES) && DEFAULT_EMAIL_MAX_MESSAGES > 0
                 ? Math.min(DEFAULT_EMAIL_MAX_MESSAGES, 50)
                 : 15;
@@ -354,6 +357,7 @@ app.http('ScanAgentEmailInbox', {
             const messages = Array.isArray(listRes?.data?.messages) ? listRes.data.messages : [];
 
             let createdOrUpdated = 0;
+            stage = 'process_messages';
             for (const message of messages) {
                 try {
                     const detailRes = await gmail.users.messages.get({
@@ -373,16 +377,32 @@ app.http('ScanAgentEmailInbox', {
                 }
             }
 
-            const tasks = await getOpenTasks(12);
+            let tasks = [];
+            stage = 'load_open_tasks';
+            try {
+                tasks = await getOpenTasks(12);
+            } catch (tasksError) {
+                context.warn('[AgentEmail] failed to load open tasks after scan', {
+                    error: tasksError?.message || 'Unknown error'
+                });
+                tasks = [];
+            }
 
-            await upsertItem(ANALYTICS_CONTAINER, {
-                id: AGENT_EMAIL_LAST_SCAN_DOC_ID,
-                type: 'agent_email_scan',
-                scannedAt: new Date().toISOString(),
-                scannedMessages: messages.length,
-                generatedTasks: createdOrUpdated,
-                openTaskCount: tasks.length
-            });
+            stage = 'save_scan_metadata';
+            try {
+                await upsertItem(ANALYTICS_CONTAINER, {
+                    id: AGENT_EMAIL_LAST_SCAN_DOC_ID,
+                    type: 'agent_email_scan',
+                    scannedAt: new Date().toISOString(),
+                    scannedMessages: messages.length,
+                    generatedTasks: createdOrUpdated,
+                    openTaskCount: tasks.length
+                });
+            } catch (metaError) {
+                context.warn('[AgentEmail] failed to save scan metadata', {
+                    error: metaError?.message || 'Unknown error'
+                });
+            }
 
             return toJsonResponse(200, {
                 success: true,
@@ -392,7 +412,11 @@ app.http('ScanAgentEmailInbox', {
             });
         } catch (error) {
             context.error('[AgentEmail] scan error', error);
-            return toJsonResponse(500, { error: 'Failed to scan inbox', details: error.message });
+            return toJsonResponse(500, {
+                error: 'Failed to scan inbox',
+                details: error.message,
+                stage
+            });
         }
     }
 });
