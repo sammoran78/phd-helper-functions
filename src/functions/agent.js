@@ -2,8 +2,11 @@ const { app } = require('@azure/functions');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
 const { getItem, queryItems, upsertItem, replaceItem } = require('../../shared/cosmosClient');
+const { getCalendarClient } = require('../../shared/googleAuth');
 
 const ANALYTICS_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
+const PROJECTS_CONTAINER = process.env.COSMOSDB_CONTAINER_PROJECTS || 'projects';
+const DASHBOARD_SNAPSHOT_ID = 'dashboard_snapshot';
 
 const AGENT_EMAIL_OAUTH_DOC_ID = 'agent_email_oauth';
 const AGENT_EMAIL_OAUTH_STATE_DOC_ID = 'agent_email_oauth_state';
@@ -24,6 +27,218 @@ function toJsonResponse(status, payload) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     };
+}
+
+function parseDateMs(value) {
+    const ms = new Date(value || 0).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+}
+
+async function getOpenPlannerTasks(limit = 24) {
+    const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : 24;
+    const results = await queryItems(PROJECTS_CONTAINER, {
+        query: 'SELECT c.id, c.title, c.description, c.status, c.priority, c.dueDate, c.subProject, c.updatedAt FROM c WHERE c.type = "task" AND (c.status = "todo" OR c.status = "in-progress" OR c.status = "review")'
+    });
+    const list = Array.isArray(results) ? results : [];
+    return list
+        .sort((a, b) => {
+            const aDue = parseDateMs(a?.dueDate);
+            const bDue = parseDateMs(b?.dueDate);
+            if (aDue && bDue) return aDue - bDue;
+            if (aDue) return -1;
+            if (bDue) return 1;
+            return parseDateMs(b?.updatedAt) - parseDateMs(a?.updatedAt);
+        })
+        .slice(0, cappedLimit);
+}
+
+async function getUpcomingCalendarEvents(limit = 12, context) {
+    const calendarId = process.env.GOOGLE_CALENDAR_ID;
+    if (!calendarId) return [];
+
+    try {
+        const calendar = await getCalendarClient();
+        const res = await calendar.events.list({
+            calendarId,
+            timeMin: new Date().toISOString(),
+            maxResults: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 30) : 12,
+            singleEvents: true,
+            orderBy: 'startTime'
+        });
+
+        const events = Array.isArray(res?.data?.items) ? res.data.items : [];
+        return events.map((event) => {
+            const start = event?.start?.dateTime || event?.start?.date || null;
+            const end = event?.end?.dateTime || event?.end?.date || null;
+            return {
+                id: event?.id || null,
+                title: (event?.summary || 'Untitled').toString(),
+                start,
+                end,
+                isAllDay: Boolean(event?.start?.date && !event?.start?.dateTime),
+                projectName: event?.extendedProperties?.private?.projectName || ''
+            };
+        });
+    } catch (error) {
+        context?.warn('[AgentDependency] calendar fetch failed', {
+            error: error?.message || 'Unknown error'
+        });
+        return [];
+    }
+}
+
+function fallbackDependencyBrief(openTasks, plannerTasks, upcomingEvents, analyticsSnapshot) {
+    const openEmail = Array.isArray(openTasks) ? openTasks : [];
+    const openPlanner = Array.isArray(plannerTasks) ? plannerTasks : [];
+    const events = Array.isArray(upcomingEvents) ? upcomingEvents : [];
+
+    const now = Date.now();
+    const next48h = now + (48 * 60 * 60 * 1000);
+    const next72h = now + (72 * 60 * 60 * 1000);
+
+    const highEmail = openEmail.filter((task) => normalizePriority(task?.priority) === 'high').slice(0, 3);
+    const duePlanner = openPlanner.filter((task) => {
+        const dueMs = parseDateMs(task?.dueDate);
+        return dueMs > 0 && dueMs <= next72h;
+    }).slice(0, 3);
+    const nearEvents = events.filter((event) => {
+        const eventMs = parseDateMs(event?.start);
+        return eventMs > 0 && eventMs <= next48h;
+    }).slice(0, 3);
+
+    const risks = [];
+
+    if (highEmail.length > 0 && nearEvents.length > 0) {
+        const eventTitles = nearEvents.map((event) => event.title).join(', ');
+        risks.push({
+            title: 'Calendar-time pressure against high-priority inbox items',
+            reason: `${highEmail.length} high-priority email task(s) are still open while ${nearEvents.length} event(s) are scheduled in the next 48h (${eventTitles}).`
+        });
+    }
+
+    if (duePlanner.length > 0 && openEmail.length > 0) {
+        risks.push({
+            title: 'Planner and inbox queues are both active',
+            reason: `${duePlanner.length} planner task(s) are due in the next 72h while ${openEmail.length} inbox task(s) remain open; prioritize deadline-linked items first.`
+        });
+    }
+
+    const daysToMilestone = Number.parseInt(analyticsSnapshot?.daysToMilestone, 10);
+    if (Number.isFinite(daysToMilestone) && daysToMilestone > 0 && daysToMilestone <= 14 && (highEmail.length + duePlanner.length) > 0) {
+        risks.push({
+            title: 'Milestone window is tight',
+            reason: `Milestone "${analyticsSnapshot?.milestoneName || 'Upcoming milestone'}" is ${daysToMilestone} day(s) away with unresolved task load across inbox/planner.`
+        });
+    }
+
+    const summary = risks.length > 0
+        ? `Cross-source check found ${risks.length} dependency risk${risks.length > 1 ? 's' : ''}. Resolve near-term planner deadlines and high-priority inbox tasks around upcoming calendar commitments.`
+        : 'No major cross-source conflicts detected right now. Keep inbox and planner queues trimmed before the next calendar block.';
+
+    return {
+        summary,
+        risks: risks.slice(0, 3),
+        generatedAt: new Date().toISOString(),
+        source: 'fallback',
+        signals: {
+            openEmailTasks: openEmail.length,
+            openPlannerTasks: openPlanner.length,
+            upcomingEvents: events.length,
+            daysToMilestone: Number.isFinite(daysToMilestone) ? daysToMilestone : null,
+            milestoneName: analyticsSnapshot?.milestoneName || null,
+            wordCount: Number.isFinite(Number(analyticsSnapshot?.wordCount)) ? Number(analyticsSnapshot.wordCount) : null
+        }
+    };
+}
+
+async function buildCrossSourceDependencyBrief(openTasks, plannerTasks, upcomingEvents, analyticsSnapshot, context) {
+    const fallback = fallbackDependencyBrief(openTasks, plannerTasks, upcomingEvents, analyticsSnapshot);
+
+    const client = getAgentOpenAiClient();
+    const model = (process.env.AGENT_EMAIL_LLM_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini').toString().trim();
+    if (!client || !model) {
+        return fallback;
+    }
+
+    try {
+        const completion = await client.chat.completions.create({
+            model,
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a PhD supervisor agent identifying cross-source dependency risks. Return strict JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        task: 'Identify top dependency risks across inbox tasks, planner tasks, calendar commitments, and analytics milestone context.',
+                        constraints: {
+                            maxRisks: 3,
+                            style: 'actionable and concise'
+                        },
+                        outputSchema: {
+                            summary: '2-4 sentences',
+                            risks: [{ title: 'short title', reason: '1-2 sentence explanation' }]
+                        },
+                        inboxOpenTasks: (Array.isArray(openTasks) ? openTasks : []).slice(0, 8).map((task) => ({
+                            id: task.id,
+                            title: task.title,
+                            priority: normalizePriority(task.priority),
+                            confidence: task.confidence,
+                            createdAt: task.createdAt
+                        })),
+                        plannerOpenTasks: (Array.isArray(plannerTasks) ? plannerTasks : []).slice(0, 8).map((task) => ({
+                            id: task.id,
+                            title: task.title,
+                            status: task.status,
+                            priority: (task.priority || '').toString(),
+                            dueDate: task.dueDate,
+                            subProject: task.subProject || ''
+                        })),
+                        upcomingCalendarEvents: (Array.isArray(upcomingEvents) ? upcomingEvents : []).slice(0, 8).map((event) => ({
+                            id: event.id,
+                            title: event.title,
+                            start: event.start,
+                            isAllDay: event.isAllDay,
+                            projectName: event.projectName || ''
+                        })),
+                        analytics: {
+                            daysToMilestone: analyticsSnapshot?.daysToMilestone,
+                            milestoneName: analyticsSnapshot?.milestoneName || null,
+                            wordCount: analyticsSnapshot?.wordCount,
+                            wordCountTarget: analyticsSnapshot?.wordCountTarget
+                        }
+                    })
+                }
+            ]
+        });
+
+        const parsed = JSON.parse(completion?.choices?.[0]?.message?.content || '{}');
+        const summary = truncate((parsed?.summary || '').toString(), 480) || fallback.summary;
+        const rawRisks = Array.isArray(parsed?.risks) ? parsed.risks : [];
+        const risks = rawRisks
+            .map((risk) => ({
+                title: truncate((risk?.title || '').toString().trim(), 96),
+                reason: truncate((risk?.reason || '').toString().trim(), 220)
+            }))
+            .filter((risk) => risk.title && risk.reason)
+            .slice(0, 3);
+
+        return {
+            ...fallback,
+            summary,
+            risks: risks.length > 0 ? risks : fallback.risks,
+            generatedAt: new Date().toISOString(),
+            source: risks.length > 0 ? 'openai' : 'openai_fallback_risks'
+        };
+    } catch (error) {
+        context?.warn('[AgentDependency] synthesis failed, using fallback', {
+            error: error?.message || 'Unknown error'
+        });
+        return fallback;
+    }
 }
 
 function fallbackEndOfDayBrief(openTasks, recentlyClosedTasks) {
@@ -905,6 +1120,35 @@ app.http('GetAgentEndOfDayBrief', {
         } catch (error) {
             context.error('[AgentBrief] end-of-day brief error', error);
             return toJsonResponse(500, { error: 'Failed to build end-of-day brief', details: error.message });
+        }
+    }
+});
+
+app.http('GetAgentDependencyBrief', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'agent/brief/dependencies',
+    handler: async (_request, context) => {
+        try {
+            const [openTasks, plannerTasks, upcomingEvents, analyticsSnapshot] = await Promise.all([
+                getOpenTasks(12),
+                getOpenPlannerTasks(24),
+                getUpcomingCalendarEvents(12, context),
+                getItem(ANALYTICS_CONTAINER, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID)
+            ]);
+
+            const brief = await buildCrossSourceDependencyBrief(
+                openTasks,
+                plannerTasks,
+                upcomingEvents,
+                analyticsSnapshot || {},
+                context
+            );
+
+            return toJsonResponse(200, brief);
+        } catch (error) {
+            context.error('[AgentBrief] dependency brief error', error);
+            return toJsonResponse(500, { error: 'Failed to build dependency brief', details: error.message });
         }
     }
 });
