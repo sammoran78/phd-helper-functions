@@ -266,3 +266,5 @@ const API_BASE = '/api';
 5. ⬜ Configure Static Web App to use Functions as API
 6. ⬜ Set up CI/CD pipeline (GitHub Actions)
 7. ⬜ Add monitoring and Application Insights
+
+Testinfg the updates
