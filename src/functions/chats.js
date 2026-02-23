@@ -14,7 +14,7 @@ app.http('GetChats', {
             context.log('Loading chat conversations from CosmosDB');
             
             const querySpec = {
-                query: 'SELECT c.id, c.title, c.createdAt, c.updatedAt, c.messageCount FROM c WHERE c.id != @promptId ORDER BY c.updatedAt DESC',
+                query: 'SELECT c.id, c.title, c.type, c.createdAt, c.updatedAt, c.messageCount FROM c WHERE c.id != @promptId ORDER BY c.updatedAt DESC',
                 parameters: [{ name: '@promptId', value: SYSTEM_PROMPT_DOC_ID }]
             };
             
@@ -85,7 +85,7 @@ app.http('CreateChat', {
             
             const newChat = {
                 id: `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-                type: 'chat',
+                type: (body.type || 'chat').toString().trim() || 'chat',
                 title: body.title || 'New Conversation',
                 messages: body.messages || [],
                 messageCount: body.messages?.length || 0,
