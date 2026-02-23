@@ -168,9 +168,12 @@ async function upsertTaskFromMessage(messageDetail) {
 async function getOpenTasks(limit = 12) {
     const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 12;
     const results = await queryItems(ANALYTICS_CONTAINER, {
-        query: `SELECT TOP ${cappedLimit} c.id, c.title, c.desc, c.source, c.status, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = "open" ORDER BY c.createdAt DESC`
+        query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = "open"'
     });
-    return Array.isArray(results) ? results : [];
+    const list = Array.isArray(results) ? results : [];
+    return list
+        .sort((a, b) => (new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime()))
+        .slice(0, cappedLimit);
 }
 
 app.http('GetAgentEmailStatus', {
@@ -432,13 +435,14 @@ app.http('GetAgentTasks', {
             const limitRaw = Number.parseInt(url.searchParams.get('limit') || '20', 10);
             const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 100) : 20;
 
-            const querySpec = {
-                query: `SELECT TOP ${limit} c.id, c.title, c.desc, c.source, c.status, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = @status ORDER BY c.createdAt DESC`,
+            const tasks = await queryItems(ANALYTICS_CONTAINER, {
+                query: 'SELECT c.id, c.title, c.desc, c.source, c.status, c.createdAt, c.updatedAt, c.evidence FROM c WHERE c.type = "agent_task" AND c.status = @status',
                 parameters: [{ name: '@status', value: status }]
-            };
+            });
 
-            const tasks = await queryItems(ANALYTICS_CONTAINER, querySpec);
-            return toJsonResponse(200, Array.isArray(tasks) ? tasks : []);
+            const list = Array.isArray(tasks) ? tasks : [];
+            const sorted = list.sort((a, b) => (new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime()));
+            return toJsonResponse(200, sorted.slice(0, limit));
         } catch (error) {
             context.error('[AgentTasks] list error', error);
             return toJsonResponse(500, { error: 'Failed to load agent tasks', details: error.message });
