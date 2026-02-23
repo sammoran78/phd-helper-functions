@@ -6,6 +6,7 @@ const { getCalendarClient } = require('../../shared/googleAuth');
 
 const ANALYTICS_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const PROJECTS_CONTAINER = process.env.COSMOSDB_CONTAINER_PROJECTS || 'projects';
+const CHATS_CONTAINER = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
 const DASHBOARD_SNAPSHOT_ID = 'dashboard_snapshot';
 
 const AGENT_EMAIL_OAUTH_DOC_ID = 'agent_email_oauth';
@@ -721,6 +722,105 @@ function getAgentOpenAiClient() {
         agentOpenAiClient = new OpenAI({ apiKey });
     }
     return agentOpenAiClient;
+}
+
+function buildSupervisorSystemPrompt() {
+    return [
+        'You are an AI PhD Supervisor Agent focused on momentum, execution quality, and milestone progress.',
+        'You are NOT a RAG citation assistant. Do not use citation markers like {{cite:...}} and do not reference vector stores.',
+        'Base advice on the provided operational signals: inbox-derived tasks, planner tasks, calendar events, and analytics milestone context.',
+        'Be concise, practical, and sequenced. Prioritize what to do first, what to defer, and why.',
+        'Use markdown with clear headings and bullet points. Keep output actionable.'
+    ].join(' ');
+}
+
+async function buildSupervisorSignalSnapshot(context) {
+    const [openTasksResult, plannerTasksResult, upcomingEventsResult, analyticsSnapshotResult] = await Promise.allSettled([
+        getOpenTasks(12),
+        getOpenPlannerTasks(24),
+        getUpcomingCalendarEvents(12, context),
+        getItem(ANALYTICS_CONTAINER, DASHBOARD_SNAPSHOT_ID, DASHBOARD_SNAPSHOT_ID)
+    ]);
+
+    const openTasks = openTasksResult.status === 'fulfilled' ? openTasksResult.value : [];
+    const plannerTasks = plannerTasksResult.status === 'fulfilled' ? plannerTasksResult.value : [];
+    const upcomingEvents = upcomingEventsResult.status === 'fulfilled' ? upcomingEventsResult.value : [];
+    const analyticsSnapshot = analyticsSnapshotResult.status === 'fulfilled' ? (analyticsSnapshotResult.value || {}) : {};
+
+    if (openTasksResult.status !== 'fulfilled') {
+        context?.warn('[AgentChat] open tasks unavailable for supervisor chat context', {
+            error: openTasksResult.reason?.message || 'Unknown error'
+        });
+    }
+    if (plannerTasksResult.status !== 'fulfilled') {
+        context?.warn('[AgentChat] planner tasks unavailable for supervisor chat context', {
+            error: plannerTasksResult.reason?.message || 'Unknown error'
+        });
+    }
+    if (upcomingEventsResult.status !== 'fulfilled') {
+        context?.warn('[AgentChat] calendar events unavailable for supervisor chat context', {
+            error: upcomingEventsResult.reason?.message || 'Unknown error'
+        });
+    }
+    if (analyticsSnapshotResult.status !== 'fulfilled') {
+        context?.warn('[AgentChat] analytics snapshot unavailable for supervisor chat context', {
+            error: analyticsSnapshotResult.reason?.message || 'Unknown error'
+        });
+    }
+
+    return {
+        openAgentTasks: (Array.isArray(openTasks) ? openTasks : []).slice(0, 8).map((task) => ({
+            id: task?.id,
+            title: task?.title,
+            priority: normalizePriority(task?.priority),
+            rationale: task?.rationale || '',
+            confidence: task?.confidence,
+            createdAt: task?.createdAt
+        })),
+        openPlannerTasks: (Array.isArray(plannerTasks) ? plannerTasks : []).slice(0, 10).map((task) => ({
+            id: task?.id,
+            title: task?.title,
+            status: task?.status,
+            priority: (task?.priority || '').toString(),
+            dueDate: task?.dueDate,
+            subProject: task?.subProject || ''
+        })),
+        upcomingEvents: (Array.isArray(upcomingEvents) ? upcomingEvents : []).slice(0, 8).map((event) => ({
+            id: event?.id,
+            title: event?.title,
+            start: event?.start,
+            isAllDay: event?.isAllDay,
+            projectName: event?.projectName || ''
+        })),
+        milestoneContext: {
+            milestoneName: analyticsSnapshot?.milestoneName || null,
+            daysToMilestone: Number.isFinite(Number(analyticsSnapshot?.daysToMilestone)) ? Number(analyticsSnapshot.daysToMilestone) : null,
+            wordCount: Number.isFinite(Number(analyticsSnapshot?.wordCount)) ? Number(analyticsSnapshot.wordCount) : null,
+            wordCountTarget: Number.isFinite(Number(analyticsSnapshot?.wordCountTarget)) ? Number(analyticsSnapshot.wordCountTarget) : null
+        }
+    };
+}
+
+async function loadSupervisorChatHistory(chatId, context) {
+    if (!chatId) return [];
+    try {
+        const chat = await getItem(CHATS_CONTAINER, chatId, chatId);
+        const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+        return messages
+            .slice(-12)
+            .map((message) => ({
+                role: (message?.role || '').toString().trim().toLowerCase(),
+                content: (message?.content || '').toString()
+            }))
+            .filter((message) => ['user', 'assistant', 'system'].includes(message.role) && message.content.trim().length > 0)
+            .map((message) => ({ role: message.role, content: truncate(message.content, 2500) }));
+    } catch (error) {
+        context?.warn('[AgentChat] failed to load chat history', {
+            chatId,
+            error: error?.message || 'Unknown error'
+        });
+        return [];
+    }
 }
 
 async function synthesizeEmailTasks(messageSignals, context) {
@@ -1447,6 +1547,105 @@ app.http('GetAgentWeeklyBrief', {
         } catch (error) {
             context.error('[AgentBrief] weekly brief error', error);
             return toJsonResponse(500, { error: 'Failed to build weekly brief', details: error.message });
+        }
+    }
+});
+
+app.http('StreamAgentSupervisorChat', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'agent/chat/stream',
+    handler: async (request, context) => {
+        try {
+            const body = await request.json();
+            const query = (body?.query || body?.message || '').toString().trim();
+            const chatId = (body?.chatId || '').toString().trim();
+
+            if (!query) {
+                return toJsonResponse(400, { error: 'query is required' });
+            }
+
+            const client = getAgentOpenAiClient();
+            const model = (process.env.AGENT_EMAIL_LLM_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini').toString().trim();
+            if (!client || !model) {
+                return toJsonResponse(500, { error: 'OpenAI is not configured for supervisor chat' });
+            }
+
+            const [signalSnapshot, historyMessages] = await Promise.all([
+                buildSupervisorSignalSnapshot(context),
+                loadSupervisorChatHistory(chatId, context)
+            ]);
+
+            const messages = [
+                { role: 'system', content: buildSupervisorSystemPrompt() },
+                {
+                    role: 'system',
+                    content: `Current operational context (JSON):\n${JSON.stringify(signalSnapshot)}`
+                },
+                ...historyMessages
+            ];
+
+            const lastHistory = historyMessages.length > 0 ? historyMessages[historyMessages.length - 1] : null;
+            if (!(lastHistory && lastHistory.role === 'user' && lastHistory.content.trim() === query)) {
+                messages.push({ role: 'user', content: query });
+            }
+
+            const { ReadableStream } = require('stream/web');
+            const encoder = new TextEncoder();
+
+            const stream = new ReadableStream({
+                start(controller) {
+                    const send = (eventName, data) => {
+                        if (eventName) controller.enqueue(encoder.encode(`event: ${eventName}\n`));
+                        const payload = typeof data === 'string' ? data : JSON.stringify(data);
+                        const lines = payload.split(/\r?\n/);
+                        for (const line of lines) {
+                            controller.enqueue(encoder.encode(`data: ${line}\n`));
+                        }
+                        controller.enqueue(encoder.encode('\n'));
+                    };
+
+                    (async () => {
+                        let fullText = '';
+                        try {
+                            const completionStream = await client.chat.completions.create({
+                                model,
+                                temperature: 0.25,
+                                stream: true,
+                                messages
+                            });
+
+                            for await (const chunk of completionStream) {
+                                const delta = chunk?.choices?.[0]?.delta?.content;
+                                if (typeof delta === 'string' && delta.length > 0) {
+                                    fullText += delta;
+                                    send('delta', delta);
+                                }
+                            }
+
+                            send('done', { content: fullText, citations: [] });
+                            controller.close();
+                        } catch (error) {
+                            send('error', { error: 'Supervisor chat stream failed', details: error?.message || String(error) });
+                            controller.close();
+                        }
+                    })();
+                }
+            });
+
+            return {
+                status: 200,
+                enableContentNegotiation: false,
+                headers: {
+                    'Content-Type': 'text/event-stream; charset=utf-8',
+                    'Cache-Control': 'no-cache, no-transform',
+                    'Connection': 'keep-alive'
+                },
+                body: stream
+            };
+        } catch (error) {
+            context.error('[AgentChat] stream setup failed', error);
+            return toJsonResponse(500, { error: 'Failed to start supervisor chat stream', details: error?.message || 'Unknown error' });
         }
     }
 });
