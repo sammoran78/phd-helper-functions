@@ -26,6 +26,142 @@ function toJsonResponse(status, payload) {
     };
 }
 
+function fallbackEndOfDayBrief(openTasks, recentlyClosedTasks) {
+    const carry = Array.isArray(openTasks) ? openTasks.slice(0, 3) : [];
+    const closedCount = Array.isArray(recentlyClosedTasks) ? recentlyClosedTasks.length : 0;
+
+    if (carry.length === 0) {
+        return {
+            summary: `Great close-out. No carry-over tasks detected${closedCount ? ` and ${closedCount} tasks were closed recently` : ''}.`,
+            carryOver: [],
+            source: 'fallback'
+        };
+    }
+
+    return {
+        summary: `End-of-day carry-over: focus on ${carry.length} open task${carry.length > 1 ? 's' : ''} first tomorrow.${closedCount ? ` You closed ${closedCount} task${closedCount > 1 ? 's' : ''} recently.` : ''}`,
+        carryOver: carry.map((task) => ({
+            taskId: task.id,
+            reason: `Still open (${normalizePriority(task.priority)} priority).`
+        })),
+        source: 'fallback'
+    };
+}
+
+async function buildEndOfDayCarryover(openTasks, recentlyClosedTasks, context) {
+    const open = Array.isArray(openTasks) ? openTasks : [];
+    const recentClosed = Array.isArray(recentlyClosedTasks) ? recentlyClosedTasks : [];
+    const fallback = fallbackEndOfDayBrief(open, recentClosed);
+
+    if (open.length === 0) {
+        return {
+            summary: fallback.summary,
+            carryOver: [],
+            generatedAt: new Date().toISOString(),
+            source: fallback.source
+        };
+    }
+
+    const client = getAgentOpenAiClient();
+    const model = (process.env.AGENT_EMAIL_LLM_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini').toString().trim();
+    if (!client || !model) {
+        return {
+            summary: fallback.summary,
+            carryOver: fallback.carryOver,
+            generatedAt: new Date().toISOString(),
+            source: fallback.source
+        };
+    }
+
+    const topOpen = open.slice(0, 6).map((task) => ({
+        id: task.id,
+        title: task.title,
+        priority: normalizePriority(task.priority),
+        confidence: task.confidence,
+        rationale: task.rationale || '',
+        createdAt: task.createdAt
+    }));
+
+    const recentlyClosedSummary = recentClosed.slice(0, 6).map((task) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        updatedAt: task.updatedAt
+    }));
+
+    try {
+        const completion = await client.chat.completions.create({
+            model,
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a PhD productivity supervisor writing end-of-day carry-over guidance. Return strict JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        task: 'Recommend top carry-over tasks for tomorrow morning from currently open tasks.',
+                        constraints: {
+                            maxCarryOver: 3,
+                            prioritize: ['high priority', 'high confidence', 'older unresolved commitments']
+                        },
+                        outputSchema: {
+                            summary: '2-4 sentence end-of-day note',
+                            carryOver: [{ taskId: 'agent_task_id', reason: 'short reason' }]
+                        },
+                        openTasks: topOpen,
+                        recentlyClosedTasks: recentlyClosedSummary
+                    })
+                }
+            ]
+        });
+
+        const parsed = JSON.parse(completion?.choices?.[0]?.message?.content || '{}');
+        const summary = truncate((parsed?.summary || '').toString().trim(), 480) || fallback.summary;
+        const rawCarryOver = Array.isArray(parsed?.carryOver) ? parsed.carryOver : [];
+
+        const openById = new Map(open.map((task) => [task.id, task]));
+        const carryOver = [];
+        for (const item of rawCarryOver) {
+            const taskId = (item?.taskId || '').toString().trim();
+            if (!taskId || !openById.has(taskId)) continue;
+            carryOver.push({
+                taskId,
+                reason: truncate((item?.reason || '').toString().trim(), 180) || 'Still unresolved and relevant.'
+            });
+            if (carryOver.length >= 3) break;
+        }
+
+        if (carryOver.length === 0) {
+            return {
+                summary,
+                carryOver: fallback.carryOver,
+                generatedAt: new Date().toISOString(),
+                source: 'openai_fallback_carryover'
+            };
+        }
+
+        return {
+            summary,
+            carryOver,
+            generatedAt: new Date().toISOString(),
+            source: 'openai'
+        };
+    } catch (error) {
+        context?.warn('[AgentEmail] end-of-day synthesis failed, using fallback', {
+            error: error?.message || 'Unknown error'
+        });
+        return {
+            summary: fallback.summary,
+            carryOver: fallback.carryOver,
+            generatedAt: new Date().toISOString(),
+            source: fallback.source
+        };
+    }
+}
+
 function fallbackMorningBrief(topTasks) {
     if (!Array.isArray(topTasks) || topTasks.length === 0) {
         return 'No urgent items this morning. Run an inbox scan to generate fresh tasks.';
@@ -404,6 +540,17 @@ async function getOpenTasks(limit = 12) {
         .slice(0, cappedLimit);
 }
 
+async function getRecentlyClosedTasks(limit = 12) {
+    const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 12;
+    const results = await queryItems(ANALYTICS_CONTAINER, {
+        query: 'SELECT c.id, c.title, c.status, c.updatedAt FROM c WHERE c.type = "agent_task" AND (c.status = "completed" OR c.status = "snoozed")'
+    });
+    const list = Array.isArray(results) ? results : [];
+    return list
+        .sort((a, b) => (new Date(b?.updatedAt || 0).getTime() - new Date(a?.updatedAt || 0).getTime()))
+        .slice(0, cappedLimit);
+}
+
 app.http('GetAgentEmailStatus', {
     methods: ['GET'],
     authLevel: 'anonymous',
@@ -739,6 +886,25 @@ app.http('GetAgentMorningBrief', {
         } catch (error) {
             context.error('[AgentBrief] morning brief error', error);
             return toJsonResponse(500, { error: 'Failed to build morning brief', details: error.message });
+        }
+    }
+});
+
+app.http('GetAgentEndOfDayBrief', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'agent/brief/eod',
+    handler: async (_request, context) => {
+        try {
+            const [openTasks, recentlyClosedTasks] = await Promise.all([
+                getOpenTasks(12),
+                getRecentlyClosedTasks(12)
+            ]);
+            const brief = await buildEndOfDayCarryover(openTasks, recentlyClosedTasks, context);
+            return toJsonResponse(200, brief);
+        } catch (error) {
+            context.error('[AgentBrief] end-of-day brief error', error);
+            return toJsonResponse(500, { error: 'Failed to build end-of-day brief', details: error.message });
         }
     }
 });
