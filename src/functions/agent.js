@@ -237,7 +237,7 @@ function parseDateMs(value) {
 async function getOpenPlannerTasks(limit = 24) {
     const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 100) : 24;
     const results = await queryItems(PROJECTS_CONTAINER, {
-        query: 'SELECT c.id, c.title, c.description, c.status, c.priority, c.dueDate, c.subProject, c.updatedAt FROM c WHERE c.type = "task" AND (c.status = "todo" OR c.status = "in-progress" OR c.status = "review")'
+        query: 'SELECT * FROM c WHERE c.type = "task" AND (c.status = "todo" OR c.status = "in-progress" OR c.status = "review")'
     });
     const list = Array.isArray(results) ? results : [];
     return list
@@ -729,6 +729,7 @@ function buildSupervisorSystemPrompt() {
         'You are an AI PhD Supervisor Agent focused on momentum, execution quality, and milestone progress.',
         'You are NOT a RAG citation assistant. Do not use citation markers like {{cite:...}} and do not reference vector stores.',
         'Base advice on the provided operational signals: inbox-derived tasks, planner tasks, calendar events, and analytics milestone context.',
+        'Use task descriptions, progress notes, and extended detail fields when available to ground your recommendations.',
         'Be concise, practical, and sequenced. Prioritize what to do first, what to defer, and why.',
         'Use markdown with clear headings and bullet points. Keep output actionable.'
     ].join(' ');
@@ -772,18 +773,24 @@ async function buildSupervisorSignalSnapshot(context) {
         openAgentTasks: (Array.isArray(openTasks) ? openTasks : []).slice(0, 8).map((task) => ({
             id: task?.id,
             title: task?.title,
+            description: (task?.desc || task?.description || task?.moreDetail || task?.moreInfo || '').toString(),
             priority: normalizePriority(task?.priority),
             rationale: task?.rationale || '',
             confidence: task?.confidence,
-            createdAt: task?.createdAt
+            status: task?.status || 'open',
+            createdAt: task?.createdAt,
+            updatedAt: task?.updatedAt || null
         })),
         openPlannerTasks: (Array.isArray(plannerTasks) ? plannerTasks : []).slice(0, 10).map((task) => ({
             id: task?.id,
             title: task?.title,
+            description: (task?.description || task?.desc || task?.details || task?.notes || task?.moreDetail || '').toString(),
             status: task?.status,
             priority: (task?.priority || '').toString(),
             dueDate: task?.dueDate,
-            subProject: task?.subProject || ''
+            subProject: task?.subProject || '',
+            progress: (task?.progressNote || task?.progress || task?.statusDetail || '').toString(),
+            updatedAt: task?.updatedAt || null
         })),
         upcomingEvents: (Array.isArray(upcomingEvents) ? upcomingEvents : []).slice(0, 8).map((event) => ({
             id: event?.id,
