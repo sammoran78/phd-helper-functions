@@ -26,6 +26,123 @@ function toJsonResponse(status, payload) {
     };
 }
 
+function fallbackMorningBrief(topTasks) {
+    if (!Array.isArray(topTasks) || topTasks.length === 0) {
+        return 'No urgent items this morning. Run an inbox scan to generate fresh tasks.';
+    }
+
+    const lines = topTasks.map((task, idx) => {
+        const pri = normalizePriority(task?.priority);
+        return `${idx + 1}. [${pri.toUpperCase()}] ${(task?.title || 'Untitled task').toString()}`;
+    });
+    return `Morning brief: focus on these ${topTasks.length} tasks first.\n${lines.join('\n')}`;
+}
+
+async function buildMorningBriefFromTasks(tasks, context) {
+    const taskList = Array.isArray(tasks) ? tasks : [];
+    const ranked = taskList
+        .slice()
+        .sort((a, b) => {
+            const priDiff = priorityRank(b?.priority) - priorityRank(a?.priority);
+            if (priDiff !== 0) return priDiff;
+
+            const aConf = Number.parseFloat(a?.confidence);
+            const bConf = Number.parseFloat(b?.confidence);
+            const safeAConf = Number.isFinite(aConf) ? aConf : -1;
+            const safeBConf = Number.isFinite(bConf) ? bConf : -1;
+            if (safeBConf !== safeAConf) return safeBConf - safeAConf;
+
+            return new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime();
+        });
+    const topTasks = ranked.slice(0, 3);
+
+    if (topTasks.length === 0) {
+        return {
+            summary: fallbackMorningBrief(topTasks),
+            tasks: [],
+            generatedAt: new Date().toISOString(),
+            source: 'fallback'
+        };
+    }
+
+    const client = getAgentOpenAiClient();
+    const model = (process.env.AGENT_EMAIL_LLM_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini').toString().trim();
+    if (!client || !model) {
+        return {
+            summary: fallbackMorningBrief(topTasks),
+            tasks: topTasks,
+            generatedAt: new Date().toISOString(),
+            source: 'fallback'
+        };
+    }
+
+    try {
+        const completion = await client.chat.completions.create({
+            model,
+            temperature: 0.2,
+            response_format: { type: 'json_object' },
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a concise PhD productivity coach. Return strict JSON only.'
+                },
+                {
+                    role: 'user',
+                    content: JSON.stringify({
+                        task: 'Write a short morning brief from top tasks.',
+                        outputSchema: {
+                            summary: '2-4 sentences with clear action order',
+                            focusOrder: [{ taskId: 'agent task id', reason: 'short reason' }]
+                        },
+                        tasks: topTasks.map((task) => ({
+                            id: task.id,
+                            title: task.title,
+                            desc: task.desc,
+                            priority: normalizePriority(task.priority),
+                            confidence: task.confidence,
+                            rationale: task.rationale || ''
+                        }))
+                    })
+                }
+            ]
+        });
+
+        const parsed = JSON.parse(completion?.choices?.[0]?.message?.content || '{}');
+        const summary = truncate((parsed?.summary || '').toString().trim(), 480) || fallbackMorningBrief(topTasks);
+
+        const focusOrderRaw = Array.isArray(parsed?.focusOrder) ? parsed.focusOrder : [];
+        const byId = new Map(topTasks.map((task) => [task.id, task]));
+        const ordered = [];
+        for (const item of focusOrderRaw) {
+            const taskId = (item?.taskId || '').toString().trim();
+            if (!taskId || !byId.has(taskId)) continue;
+            ordered.push({
+                ...byId.get(taskId),
+                briefReason: truncate((item?.reason || '').toString(), 140)
+            });
+            byId.delete(taskId);
+        }
+        ordered.push(...Array.from(byId.values()));
+
+        return {
+            summary,
+            tasks: ordered.slice(0, 3),
+            generatedAt: new Date().toISOString(),
+            source: 'openai'
+        };
+    } catch (error) {
+        context?.warn('[AgentEmail] morning brief synthesis failed, using fallback', {
+            error: error?.message || 'Unknown error'
+        });
+        return {
+            summary: fallbackMorningBrief(topTasks),
+            tasks: topTasks,
+            generatedAt: new Date().toISOString(),
+            source: 'fallback'
+        };
+    }
+}
+
 function clampConfidence(value) {
     const n = Number.parseFloat(value);
     if (!Number.isFinite(n)) return null;
@@ -38,6 +155,13 @@ function normalizePriority(value) {
     const v = (value || '').toString().trim().toLowerCase();
     if (v === 'high' || v === 'medium' || v === 'low') return v;
     return 'medium';
+}
+
+function priorityRank(value) {
+    const v = normalizePriority(value);
+    if (v === 'high') return 3;
+    if (v === 'medium') return 2;
+    return 1;
 }
 
 function getAgentOpenAiClient() {
@@ -599,6 +723,22 @@ app.http('GetAgentTasks', {
         } catch (error) {
             context.error('[AgentTasks] list error', error);
             return toJsonResponse(500, { error: 'Failed to load agent tasks', details: error.message });
+        }
+    }
+});
+
+app.http('GetAgentMorningBrief', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'agent/brief/morning',
+    handler: async (_request, context) => {
+        try {
+            const tasks = await getOpenTasks(12);
+            const brief = await buildMorningBriefFromTasks(tasks, context);
+            return toJsonResponse(200, brief);
+        } catch (error) {
+            context.error('[AgentBrief] morning brief error', error);
+            return toJsonResponse(500, { error: 'Failed to build morning brief', details: error.message });
         }
     }
 });
