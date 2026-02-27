@@ -178,6 +178,60 @@ function buildCitationRecord(fileId, source = {}, options = {}) {
     };
 }
 
+function parseReferencePageFromVectorFileName(fileName) {
+    const normalized = normalizeCitationText(fileName);
+    if (!normalized) return null;
+    const match = normalized.match(/^(ref_[^/]+)_page_(-?\d+)\.txt$/i);
+    if (!match) return null;
+    const pageNumber = Number.parseInt(match[2], 10);
+    if (!Number.isFinite(pageNumber)) return null;
+    return {
+        referenceId: match[1],
+        pageNumber
+    };
+}
+
+async function resolveCitationFromOpenAiFileRecord(fileId, options = {}) {
+    const openai = options?.openai;
+    const context = options?.context;
+    if (!openai || !fileId) return null;
+
+    try {
+        const fileRecord = await openai.files.retrieve(fileId);
+        const parsed = parseReferencePageFromVectorFileName(fileRecord?.filename || fileRecord?.name);
+        if (!parsed) return null;
+
+        const pages = await queryItems(CONTAINER_PAGES, {
+            query: 'SELECT TOP 1 * FROM c WHERE c.referenceId = @referenceId AND c.pageNumber = @pageNumber',
+            parameters: [
+                { name: '@referenceId', value: parsed.referenceId },
+                { name: '@pageNumber', value: parsed.pageNumber }
+            ]
+        });
+
+        const page = Array.isArray(pages) && pages.length > 0 ? pages[0] : null;
+        const reference = parsed.referenceId ? await getItem(CONTAINER_REFERENCES, parsed.referenceId, parsed.referenceId) : null;
+
+        if (!page && !reference) return null;
+
+        return buildCitationRecord(fileId, {
+            referenceId: parsed.referenceId || null,
+            pageNumber: page?.pageNumber != null ? page.pageNumber : parsed.pageNumber,
+            title: reference?.title || page?.metadata?.title,
+            authors: reference?.authors || reference?.author || page?.metadata?.authors,
+            year: reference?.year || page?.metadata?.year,
+            source: reference?.source || page?.metadata?.source,
+            pageUrl: page?.blobUrl,
+            apa7: reference?.apa7
+        }, {
+            resolutionStatus: 'resolved_from_openai_file_lookup'
+        });
+    } catch (error) {
+        context?.warn?.(`[KB RAG] OpenAI file lookup failed for ${fileId}:`, error?.message || String(error));
+        return null;
+    }
+}
+
 function buildApa7Fallback(reference) {
     const authors = reference?.authors || reference?.author || 'Unknown Author';
     const year = reference?.year || 'n.d.';
@@ -209,7 +263,7 @@ async function getSystemPrompt(context) {
     }
 }
 
-async function lookupCitationByFileId(fileId) {
+async function lookupCitationByFileId(fileId, options = {}) {
     if (!fileId) return null;
 
     const pages = await queryItems(CONTAINER_PAGES, {
@@ -218,6 +272,8 @@ async function lookupCitationByFileId(fileId) {
     });
     const page = Array.isArray(pages) && pages.length > 0 ? pages[0] : null;
     if (!page) {
+        const openAiResolved = await resolveCitationFromOpenAiFileRecord(fileId, options);
+        if (openAiResolved) return openAiResolved;
         return buildCitationRecord(fileId, {}, { resolutionStatus: 'page_not_found' });
     }
 
@@ -267,12 +323,13 @@ async function lookupCitationByFileId(fileId) {
 }
 
 async function resolveCitationsForContent(content, context) {
+    const options = arguments[2] || {};
     const citationIds = extractCitationIds(content);
     const citations = [];
 
     for (const fileId of citationIds.slice(0, 12)) {
         try {
-            const citation = await lookupCitationByFileId(fileId);
+            const citation = await lookupCitationByFileId(fileId, { ...options, context });
             if (citation) citations.push(citation);
         } catch (error) {
             context?.warn?.(`[KB RAG] Citation resolution failed for ${fileId}:`, error?.message || String(error));
@@ -399,7 +456,7 @@ app.http('KBRagChat', {
             }
 
             const content = getOutputText(response);
-            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context);
+            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai });
 
             return {
                 status: 200,
@@ -555,7 +612,7 @@ app.http('KBRagChatStream', {
                                 }
                             }
 
-                            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(fullText, context);
+                            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(fullText, context, { openai });
 
                             send('done', { content: fullText, citations, unresolvedCitationIds });
                             controller.close();
