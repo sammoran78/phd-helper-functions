@@ -888,9 +888,32 @@ function truncateForAttribute(str, maxLen = 500) {
     return str.substring(0, maxLen - 3) + '...';
 }
 
+function normalizeMetadataValue(value) {
+    return (value == null ? '' : String(value)).trim();
+}
+
+function buildMergedMetadata(reference = {}, page = {}) {
+    const pageMeta = page?.metadata || {};
+    return {
+        title: normalizeMetadataValue(pageMeta.title || reference?.title),
+        authors: normalizeMetadataValue(pageMeta.authors || reference?.authors || reference?.author),
+        year: normalizeMetadataValue(pageMeta.year || reference?.year),
+        type: normalizeMetadataValue(pageMeta.type || reference?.type),
+        source: normalizeMetadataValue(pageMeta.source || reference?.source)
+    };
+}
+
+function getMissingRequiredMetadata(meta = {}) {
+    const missing = [];
+    if (!normalizeMetadataValue(meta.title)) missing.push('title');
+    if (!normalizeMetadataValue(meta.authors)) missing.push('authors');
+    if (!normalizeMetadataValue(meta.year)) missing.push('year');
+    return missing;
+}
+
 // Helper: Build file content with metadata header for vector store
-function buildVectorFileContent(page) {
-    const meta = page.metadata || {};
+function buildVectorFileContent(page, reference) {
+    const meta = buildMergedMetadata(reference, page);
     const header = [
         '[DOC_METADATA]',
         `referenceId: ${page.referenceId || ''}`,
@@ -909,8 +932,8 @@ function buildVectorFileContent(page) {
 }
 
 // Helper: Build attributes object for OpenAI vector store
-function buildVectorAttributes(page) {
-    const meta = page.metadata || {};
+function buildVectorAttributes(page, reference) {
+    const meta = buildMergedMetadata(reference, page);
     return {
         referenceId: page.referenceId || '',
         pageNumber: String(page.pageNumber || ''),
@@ -1015,8 +1038,52 @@ app.http('KBVectorizePages', {
                 query: 'SELECT * FROM c WHERE c.referenceId = @referenceId',
                 parameters: [{ name: '@referenceId', value: referenceId }]
             });
+            const allPagesList = Array.isArray(allPages) ? allPages : [];
 
-            if (!allPages || allPages.length === 0) {
+            const metadataIssues = [];
+            const referenceMeta = buildMergedMetadata(reference, {});
+            const missingRefFields = getMissingRequiredMetadata(referenceMeta);
+            if (missingRefFields.length > 0) {
+                metadataIssues.push({
+                    scope: 'reference',
+                    referenceId,
+                    missingFields: missingRefFields
+                });
+            }
+
+            for (const page of allPagesList) {
+                const merged = buildMergedMetadata(reference, page);
+                const missingFields = getMissingRequiredMetadata(merged);
+                if (missingFields.length > 0) {
+                    metadataIssues.push({
+                        scope: 'page',
+                        pageId: page.id,
+                        pageNumber: page.pageNumber,
+                        missingFields
+                    });
+                }
+            }
+
+            if (metadataIssues.length > 0) {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...jobRecord,
+                    status: 'error',
+                    error: 'Citation metadata incomplete. Fill title, authors, and year before vectorization.',
+                    metadataIssues,
+                    completedAt: new Date().toISOString()
+                });
+                return withCorsHeaders({
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        error: 'Citation metadata incomplete. Fill title, authors, and year before vectorization.',
+                        metadataIssues,
+                        jobId
+                    })
+                });
+            }
+
+            if (allPagesList.length === 0) {
                 await upsertItem(CONTAINER_JOBS, {
                     ...jobRecord,
                     status: 'error',
@@ -1035,8 +1102,8 @@ app.http('KBVectorizePages', {
                 && pageDoc.openaiVector.fileId
                 && pageDoc.openaiVector.status === 'completed'
             );
-            const ocrReadyPages = allPages.filter(p => p.ocrStatus === 1);
-            const pendingOcr = allPages.filter(p => p.ocrStatus !== 1);
+            const ocrReadyPages = allPagesList.filter(p => p.ocrStatus === 1);
+            const pendingOcr = allPagesList.filter(p => p.ocrStatus !== 1);
             skippedOcrPages = pendingOcr.length;
 
             if (pendingOcr.length > 0 && !allowPartialOcr) {
@@ -1090,14 +1157,14 @@ app.http('KBVectorizePages', {
             });
 
             if (!pages || pages.length === 0) {
-                const alreadyVectorized = allPages.filter(p => p.openaiVector && p.openaiVector.fileId);
-                if (alreadyVectorized.length === allPages.length) {
+                const alreadyVectorized = allPagesList.filter(p => p.openaiVector && p.openaiVector.fileId);
+                if (alreadyVectorized.length === allPagesList.length) {
                     await upsertItem(CONTAINER_JOBS, {
                         ...jobRecord,
                         status: 'complete',
-                        totalPages: allPages.length,
-                        pagesCompleted: allPages.length,
-                        pagesSucceeded: allPages.length,
+                        totalPages: allPagesList.length,
+                        pagesCompleted: allPagesList.length,
+                        pagesSucceeded: allPagesList.length,
                         pagesFailed: 0,
                         completedAt: new Date().toISOString()
                     });
@@ -1108,7 +1175,7 @@ app.http('KBVectorizePages', {
                             success: true,
                             message: 'All pages already vectorized',
                             referenceId,
-                            totalPages: allPages.length,
+                            totalPages: allPagesList.length,
                             pagesVectorized: alreadyVectorized.length,
                             skippedOcrPages,
                             proceededWithPartialOcr: allowPartialOcr,
@@ -1204,8 +1271,8 @@ app.http('KBVectorizePages', {
                 const fileName = `${referenceId}_page_${String(pageNumber).padStart(5, '0')}.txt`;
 
                 const uploadAndIndex = async () => {
-                    const fileContent = buildVectorFileContent(page);
-                    const attributes = buildVectorAttributes(page);
+                    const fileContent = buildVectorFileContent(page, reference);
+                    const attributes = buildVectorAttributes(page, reference);
                     const file = await openai.files.create({
                         file: new File([fileContent], fileName, { type: 'text/plain' }),
                         purpose: 'assistants'

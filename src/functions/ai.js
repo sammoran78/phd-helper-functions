@@ -102,6 +102,82 @@ function extractCitationIds(text) {
     return ids;
 }
 
+function normalizeCitationText(value) {
+    return (value || '').toString().trim();
+}
+
+function isPlaceholderCitationValue(value) {
+    const normalized = normalizeCitationText(value).toLowerCase();
+    return (
+        normalized === ''
+        || normalized === 'unknown author'
+        || normalized === 'unknown title'
+        || normalized === 'untitled'
+        || normalized === 'n.d.'
+        || normalized === 'nd'
+        || normalized === 'source unavailable'
+    );
+}
+
+function getPrimaryAuthorSurname(authors) {
+    const raw = normalizeCitationText(authors);
+    if (!raw) return '';
+    const firstAuthorChunk = raw.split(/\s+&\s+|\sand\s|;/i)[0].trim();
+    if (!firstAuthorChunk) return '';
+    if (firstAuthorChunk.includes(',')) {
+        return firstAuthorChunk.split(',')[0].trim();
+    }
+    const words = firstAuthorChunk.split(/\s+/).filter(Boolean);
+    return words.length > 0 ? words[words.length - 1] : '';
+}
+
+function isCitationResolved(citation) {
+    return (
+        !isPlaceholderCitationValue(citation?.authors)
+        && !isPlaceholderCitationValue(citation?.year)
+        && !isPlaceholderCitationValue(citation?.title)
+    );
+}
+
+function buildCitationRecord(fileId, source = {}, options = {}) {
+    const authors = normalizeCitationText(source?.authors || source?.author);
+    const year = normalizeCitationText(source?.year);
+    const title = normalizeCitationText(source?.title);
+    const sourceLabel = normalizeCitationText(source?.source);
+    const pageUrl = normalizeCitationText(source?.pageUrl || source?.blobUrl);
+
+    const resolved = !isPlaceholderCitationValue(authors)
+        && !isPlaceholderCitationValue(year)
+        && !isPlaceholderCitationValue(title);
+
+    const fallbackLabel = `[${fileId}]`;
+    const shortText = resolved
+        ? (() => {
+            const surname = getPrimaryAuthorSurname(authors) || 'Source';
+            return `(${surname}, ${year})`;
+        })()
+        : fallbackLabel;
+
+    const apa7 = resolved
+        ? (normalizeCitationText(source?.apa7) || buildApa7Fallback({ authors, year, title, source: sourceLabel }))
+        : '';
+
+    return {
+        id: fileId,
+        referenceId: source?.referenceId || null,
+        pageNumber: source?.pageNumber != null ? String(source.pageNumber) : null,
+        title: resolved ? title : '',
+        authors: resolved ? authors : '',
+        year: resolved ? year : '',
+        pageUrl,
+        blobUrl: pageUrl,
+        apa7,
+        resolved,
+        shortText,
+        resolutionStatus: options.resolutionStatus || (resolved ? 'resolved' : 'unresolved')
+    };
+}
+
 function buildApa7Fallback(reference) {
     const authors = reference?.authors || reference?.author || 'Unknown Author';
     const year = reference?.year || 'n.d.';
@@ -142,34 +218,71 @@ async function lookupCitationByFileId(fileId) {
     });
     const page = Array.isArray(pages) && pages.length > 0 ? pages[0] : null;
     if (!page) {
-        return {
-            id: fileId,
-            authors: 'Unknown Author',
-            year: 'n.d.',
-            title: 'Unknown Title',
-            pageUrl: '',
-            apa7: 'Source unavailable'
-        };
+        return buildCitationRecord(fileId, {}, { resolutionStatus: 'page_not_found' });
     }
 
     const referenceId = page.referenceId;
-    const reference = referenceId ? await getItem(CONTAINER_REFERENCES, referenceId, referenceId) : null;
+    let reference = referenceId ? await getItem(CONTAINER_REFERENCES, referenceId, referenceId) : null;
 
-    const authors = reference?.authors || reference?.author || page?.metadata?.authors || 'Unknown Author';
-    const year = (reference?.year || page?.metadata?.year || 'n.d.').toString();
-    const title = reference?.title || page?.metadata?.title || 'Untitled';
-    const apa7 = (reference?.apa7 || '').toString().trim() || buildApa7Fallback(reference || page?.metadata);
+    let candidate = buildCitationRecord(fileId, {
+        referenceId: referenceId || null,
+        pageNumber: page.pageNumber,
+        title: reference?.title || page?.metadata?.title,
+        authors: reference?.authors || reference?.author || page?.metadata?.authors,
+        year: reference?.year || page?.metadata?.year,
+        source: reference?.source || page?.metadata?.source,
+        pageUrl: page.blobUrl,
+        apa7: reference?.apa7
+    }, {
+        resolutionStatus: 'reference_lookup'
+    });
+
+    if (candidate.resolved) return candidate;
+
+    const pageBlobUrl = normalizeCitationText(page?.blobUrl);
+    if (!reference && pageBlobUrl) {
+        const byBlob = await queryItems(CONTAINER_REFERENCES, {
+            query: 'SELECT TOP 1 * FROM c WHERE IS_DEFINED(c.files) AND ARRAY_CONTAINS(c.files, {"url": @blobUrl}, true)',
+            parameters: [{ name: '@blobUrl', value: pageBlobUrl }]
+        });
+        if (Array.isArray(byBlob) && byBlob.length > 0) {
+            reference = byBlob[0];
+        }
+    }
+
+    candidate = buildCitationRecord(fileId, {
+        referenceId: reference?.id || referenceId || null,
+        pageNumber: page.pageNumber,
+        title: reference?.title || page?.metadata?.title,
+        authors: reference?.authors || reference?.author || page?.metadata?.authors,
+        year: reference?.year || page?.metadata?.year,
+        source: reference?.source || page?.metadata?.source,
+        pageUrl: page.blobUrl,
+        apa7: reference?.apa7
+    }, {
+        resolutionStatus: reference ? 'resolved_from_blob_lookup' : 'metadata_incomplete'
+    });
+
+    return candidate;
+}
+
+async function resolveCitationsForContent(content, context) {
+    const citationIds = extractCitationIds(content);
+    const citations = [];
+
+    for (const fileId of citationIds.slice(0, 12)) {
+        try {
+            const citation = await lookupCitationByFileId(fileId);
+            if (citation) citations.push(citation);
+        } catch (error) {
+            context?.warn?.(`[KB RAG] Citation resolution failed for ${fileId}:`, error?.message || String(error));
+            citations.push(buildCitationRecord(fileId, {}, { resolutionStatus: 'resolution_error' }));
+        }
+    }
 
     return {
-        id: fileId,
-        referenceId: referenceId || null,
-        pageNumber: page.pageNumber != null ? String(page.pageNumber) : null,
-        title,
-        authors,
-        year,
-        pageUrl: page.blobUrl || '',
-        blobUrl: page.blobUrl || '',
-        apa7
+        citations,
+        unresolvedCitationIds: citations.filter(c => !isCitationResolved(c)).map(c => c.id)
     };
 }
 
@@ -286,24 +399,7 @@ app.http('KBRagChat', {
             }
 
             const content = getOutputText(response);
-            const citationIds = extractCitationIds(content);
-            const citations = [];
-
-            for (const fileId of citationIds.slice(0, 12)) {
-                try {
-                    const cite = await lookupCitationByFileId(fileId);
-                    if (cite) citations.push(cite);
-                } catch (e) {
-                    citations.push({
-                        id: fileId,
-                        authors: 'Unknown Author',
-                        year: 'n.d.',
-                        title: 'Unknown Title',
-                        pageUrl: '',
-                        apa7: 'Source unavailable'
-                    });
-                }
-            }
+            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context);
 
             return {
                 status: 200,
@@ -311,6 +407,7 @@ app.http('KBRagChat', {
                 body: JSON.stringify({
                     content,
                     citations,
+                    unresolvedCitationIds,
                     vectorStoreId: vectorStoreId
                 })
             };
@@ -458,25 +555,9 @@ app.http('KBRagChatStream', {
                                 }
                             }
 
-                            const citationIds = extractCitationIds(fullText);
-                            const citations = [];
-                            for (const fileId of citationIds.slice(0, 12)) {
-                                try {
-                                    const cite = await lookupCitationByFileId(fileId);
-                                    if (cite) citations.push(cite);
-                                } catch (e) {
-                                    citations.push({
-                                        id: fileId,
-                                        authors: 'Unknown Author',
-                                        year: 'n.d.',
-                                        title: 'Unknown Title',
-                                        pageUrl: '',
-                                        apa7: 'Source unavailable'
-                                    });
-                                }
-                            }
+                            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(fullText, context);
 
-                            send('done', { content: fullText, citations });
+                            send('done', { content: fullText, citations, unresolvedCitationIds });
                             controller.close();
                         } catch (err) {
                             send('error', { error: 'KB RAG stream failed', details: err?.message || String(err) });
