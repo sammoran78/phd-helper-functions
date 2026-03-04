@@ -102,6 +102,93 @@ function extractCitationIds(text) {
     return ids;
 }
 
+// Extract native file_citation annotations from an OpenAI Responses API response object
+function extractNativeAnnotations(response) {
+    const annotations = [];
+    const output = Array.isArray(response?.output) ? response.output : [];
+    for (const item of output) {
+        if (item?.type !== 'message') continue;
+        const content = Array.isArray(item.content) ? item.content : [];
+        for (const c of content) {
+            if (!Array.isArray(c?.annotations)) continue;
+            for (const ann of c.annotations) {
+                const fileId = ann?.file_id || ann?.file_citation?.file_id;
+                if (fileId) {
+                    annotations.push({
+                        type: ann.type,
+                        index: ann.index,
+                        fileId,
+                        filename: ann.filename || ann.file_citation?.filename || '',
+                        startIndex: ann.start_index,
+                        endIndex: ann.end_index
+                    });
+                }
+            }
+        }
+    }
+    return annotations;
+}
+
+// When the model uses OpenAI's native annotation markers (e.g. 【4:0†source】)
+// instead of our {{cite:FILE_ID}} format, convert them.
+// Also handles position-based injection when start/end indices are available.
+function injectNativeAnnotationsAsCitations(text, annotations) {
+    if (!text || !Array.isArray(annotations) || annotations.length === 0) return text;
+    if (/\{\{cite:file-[^}]+\}\}/.test(text)) return text;
+
+    let modified = text;
+
+    // Build map of annotation index to file ID
+    const indexToFileId = {};
+    for (const ann of annotations) {
+        if (ann.index != null && ann.fileId) {
+            indexToFileId[ann.index] = ann.fileId;
+        }
+    }
+
+    // Try replacing native annotation markers: 【n:m†label】 or 【n†label】
+    const nativePattern = /[\u3010](\d+)(?::(\d+))?[\u2020\u2021]([^\u3011]*)[\u3011]/g;
+    const beforeReplace = modified;
+    modified = modified.replace(nativePattern, (match, idx) => {
+        const annIndex = parseInt(idx, 10);
+        const fileId = indexToFileId[annIndex];
+        return fileId ? `{{cite:${fileId}}}` : match;
+    });
+    if (modified !== beforeReplace) return modified;
+
+    // Fallback: position-based injection using start_index/end_index
+    const sorted = [...annotations]
+        .filter(a => a.startIndex != null && a.endIndex != null && a.fileId)
+        .sort((a, b) => b.startIndex - a.startIndex);
+    for (const ann of sorted) {
+        const before = modified.slice(0, ann.endIndex);
+        const after = modified.slice(ann.endIndex);
+        modified = before + `{{cite:${ann.fileId}}}` + after;
+    }
+
+    // Final fallback: if still no markers, deduplicate file IDs and append them
+    // at the end of the first paragraph that likely references the source
+    if (!/\{\{cite:file-[^}]+\}\}/.test(modified)) {
+        const uniqueFileIds = [];
+        for (const ann of annotations) {
+            if (ann.fileId && !uniqueFileIds.includes(ann.fileId)) {
+                uniqueFileIds.push(ann.fileId);
+            }
+        }
+        if (uniqueFileIds.length > 0) {
+            const suffix = uniqueFileIds.map(fid => `{{cite:${fid}}}`).join('');
+            const firstParaEnd = modified.indexOf('\n\n');
+            if (firstParaEnd > 0) {
+                modified = modified.slice(0, firstParaEnd) + suffix + modified.slice(firstParaEnd);
+            } else {
+                modified = modified + suffix;
+            }
+        }
+    }
+
+    return modified;
+}
+
 function normalizeCitationText(value) {
     return (value || '').toString().trim();
 }
@@ -403,14 +490,21 @@ app.http('KBRagChat', {
             }
 
             const instructions = [
+                '=== MANDATORY CITATION FORMAT ===',
+                'EVERY claim you make that is supported by file_search results MUST include a citation marker in the EXACT form {{cite:FILE_ID}} immediately after the sentence.',
+                'FILE_ID is the OpenAI file id (starts with "file-") from the file_search results.',
+                'Example: "Photography transformed painting practices in the 1850s.{{cite:file-abc123}}"',
+                '=== END MANDATORY FORMAT ===',
+                '',
                 systemPrompt,
                 '',
                 '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
                 'You are a research assistant. Answer using ONLY the provided file_search results from the user\'s academic corpus.',
-                'When you make a claim supported by a source, append a citation marker in the EXACT form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id (e.g. file-abc123) from the file_search results.',
+                'When you reference, quote, paraphrase, or summarise information from a source, you MUST append {{cite:FILE_ID}} immediately after the relevant sentence.',
                 'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
                 'If you cannot find a supporting source in the file_search results, do NOT cite anything — just state the claim without a citation marker.',
                 'Keep answers concise but academically rigorous.',
+                'IMPORTANT: Do NOT omit citation markers. Every referenced source MUST have at least one {{cite:FILE_ID}} marker.',
                 '--- END CITATION RULES ---'
             ].filter(Boolean).join('\n');
 
@@ -455,7 +549,18 @@ app.http('KBRagChat', {
                 }
             }
 
-            const content = getOutputText(response);
+            let content = getOutputText(response);
+
+            // Fallback: if the model didn't produce {{cite:...}} markers,
+            // extract native OpenAI file_search annotations and inject them
+            if (!extractCitationIds(content).length) {
+                const nativeAnnotations = extractNativeAnnotations(response);
+                if (nativeAnnotations.length > 0) {
+                    context.log(`[KB RAG Chat] No custom citation markers found; injecting ${nativeAnnotations.length} native annotation(s)`);
+                    content = injectNativeAnnotationsAsCitations(content, nativeAnnotations);
+                }
+            }
+
             const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai });
 
             return {
@@ -540,14 +645,21 @@ app.http('KBRagChatStream', {
             }
 
             const instructions = [
+                '=== MANDATORY CITATION FORMAT ===',
+                'EVERY claim you make that is supported by file_search results MUST include a citation marker in the EXACT form {{cite:FILE_ID}} immediately after the sentence.',
+                'FILE_ID is the OpenAI file id (starts with "file-") from the file_search results.',
+                'Example: "Photography transformed painting practices in the 1850s.{{cite:file-abc123}}"',
+                '=== END MANDATORY FORMAT ===',
+                '',
                 systemPrompt,
                 '',
                 '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
                 'You are a research assistant. Answer using ONLY the provided file_search results from the user\'s academic corpus.',
-                'When you make a claim supported by a source, append a citation marker in the EXACT form {{cite:FILE_ID}} where FILE_ID is the OpenAI file id (e.g. file-abc123) from the file_search results.',
+                'When you reference, quote, paraphrase, or summarise information from a source, you MUST append {{cite:FILE_ID}} immediately after the relevant sentence.',
                 'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
                 'If you cannot find a supporting source in the file_search results, do NOT cite anything — just state the claim without a citation marker.',
                 'Keep answers concise but academically rigorous.',
+                'IMPORTANT: Do NOT omit citation markers. Every referenced source MUST have at least one {{cite:FILE_ID}} marker.',
                 '--- END CITATION RULES ---'
             ].filter(Boolean).join('\n');
 
@@ -587,6 +699,7 @@ app.http('KBRagChatStream', {
 
                     (async () => {
                         let fullText = '';
+                        let completedResponse = null;
                         try {
                             let openaiStream;
                             try {
@@ -609,6 +722,19 @@ app.http('KBRagChatStream', {
                                 if (event?.type === 'response.output_text.delta' && typeof event?.delta === 'string') {
                                     fullText += event.delta;
                                     send('delta', event.delta);
+                                }
+                                if (event?.type === 'response.completed' && event?.response) {
+                                    completedResponse = event.response;
+                                }
+                            }
+
+                            // Fallback: if the model didn't produce {{cite:...}} markers,
+                            // extract native OpenAI file_search annotations and inject them
+                            if (!extractCitationIds(fullText).length && completedResponse) {
+                                const nativeAnnotations = extractNativeAnnotations(completedResponse);
+                                if (nativeAnnotations.length > 0) {
+                                    context.log(`[KB RAG Stream] No custom citation markers found; injecting ${nativeAnnotations.length} native annotation(s)`);
+                                    fullText = injectNativeAnnotationsAsCitations(fullText, nativeAnnotations);
                                 }
                             }
 
