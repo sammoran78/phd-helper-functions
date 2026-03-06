@@ -1,6 +1,6 @@
 const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
-const { deleteBlob } = require('../../shared/blobClient');
+const { deleteBlob, blobExists } = require('../../shared/blobClient');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const OpenAI = require('openai');
@@ -273,6 +273,67 @@ const runDeleteStep = async (jobRecord, stepNumber, label, runStep) => {
     return nextJob;
 };
 
+const buildVerificationSummary = async (reference, pageList, files) => {
+    const vectorStoreIds = [];
+    const openAiFileIds = [];
+    for (const page of pageList) {
+        if (page?.openaiVector?.vectorStoreFileId) vectorStoreIds.push(page.openaiVector.vectorStoreFileId);
+        if (page?.openaiVector?.fileId) openAiFileIds.push(page.openaiVector.fileId);
+    }
+
+    const pageBlobChecks = await Promise.all(pageList.map(async (page) => {
+        const blobName = page?.blobName || extractBlobNameFromUrl(page?.blobUrl, BLOB_CONTAINER_PAGES);
+        if (!blobName) return { id: page?.id, verified: true };
+        try {
+            const exists = await blobExists(BLOB_CONTAINER_PAGES, blobName);
+            return { id: page?.id, verified: !exists };
+        } catch {
+            return { id: page?.id, verified: false };
+        }
+    }));
+
+    const uploadBlobChecks = await Promise.all(files.map(async (file) => {
+        const blobName = file?.blobName || extractBlobNameFromUrl(file?.url, BLOB_CONTAINER_UPLOADS);
+        if (!blobName) return { id: file?.name || file?.url || reference.id, verified: true };
+        try {
+            const exists = await blobExists(BLOB_CONTAINER_UPLOADS, blobName);
+            return { id: file?.name || blobName, verified: !exists };
+        } catch {
+            return { id: file?.name || blobName, verified: false };
+        }
+    }));
+
+    const pageRecordChecks = await Promise.all(pageList.map(async (page) => {
+        try {
+            const item = await getItem(CONTAINER_PAGES, page.id, page.id);
+            return { id: page.id, verified: !item };
+        } catch {
+            return { id: page.id, verified: false };
+        }
+    }));
+
+    let referenceMissing = false;
+    try {
+        const remainingReference = await getItem(CONTAINER_NAME, reference.id, reference.id);
+        referenceMissing = !remainingReference;
+    } catch {
+        referenceMissing = false;
+    }
+
+    return {
+        vectorStoreEntriesRemoved: vectorStoreIds.length,
+        openAiFilesRemoved: openAiFileIds.length,
+        pageBlobsVerifiedRemoved: pageBlobChecks.filter(item => item.verified).length,
+        uploadBlobsVerifiedRemoved: uploadBlobChecks.filter(item => item.verified).length,
+        pageRecordsVerifiedRemoved: pageRecordChecks.filter(item => item.verified).length,
+        referenceVerifiedRemoved: referenceMissing,
+        allChecksPassed: pageBlobChecks.every(item => item.verified)
+            && uploadBlobChecks.every(item => item.verified)
+            && pageRecordChecks.every(item => item.verified)
+            && referenceMissing
+    };
+};
+
 const processDeleteReferenceJob = async (jobRecord, context) => {
     let currentJob = jobRecord;
     try {
@@ -409,13 +470,16 @@ const processDeleteReferenceJob = async (jobRecord, context) => {
             return { failures, stats };
         });
 
+        const verification = await buildVerificationSummary(reference, pageList, files);
+
         await updateDeleteJob(currentJob, {
             status: 'complete',
             currentStep: currentJob.totalSteps,
             currentStepLabel: 'Deletion complete',
             progress: 100,
             completedAt: new Date().toISOString(),
-            error: null
+            error: null,
+            verification
         });
     } catch (error) {
         await updateDeleteJob(currentJob, {
@@ -551,6 +615,7 @@ app.http('GetDeleteReferenceJob', {
                     currentStepLabel: job.currentStepLabel || '',
                     progress: typeof job.progress === 'number' ? job.progress : buildDeleteJobProgress(job),
                     stepResults: Array.isArray(job.stepResults) ? job.stepResults : [],
+                    verification: job.verification || null,
                     startedAt: job.startedAt,
                     completedAt: job.completedAt,
                     error: job.error || null
