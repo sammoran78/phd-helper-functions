@@ -1,15 +1,21 @@
 const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
+const { deleteBlob } = require('../../shared/blobClient');
 const { Document, Packer, Paragraph, TextRun } = require('docx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const OpenAI = require('openai');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
+const CONTAINER_JOBS = process.env.COSMOSDB_CONTAINER_JOBS || 'jobs';
 const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const SHORTLIST_ID = 'shortlist';
+const BLOB_CONTAINER_UPLOADS = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
+const BLOB_CONTAINER_PAGES = process.env.BLOB_CONTAINER_PAGES || 'pages';
 const BIBLIOGRAPHY_FILTER_CLAUSE = 'c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
 const BIBLIOGRAPHY_EXPORT_QUERY = `SELECT c.id, c.authors, c.author, c.year, c.title, c.apa7, c.journal, c.source, c.publisher, c.doi, c.url, c.link FROM c WHERE ${BIBLIOGRAPHY_FILTER_CLAUSE}`;
 const DOCX_EXPORT_MAX_ITEMS = Number(process.env.BIBLIOGRAPHY_DOCX_MAX_ITEMS || 400);
+const JOB_TTL_SECONDS = 7200;
 
 let openaiClient = null;
 
@@ -166,6 +172,263 @@ const removeFromShortlistByKeys = async (doiKey, titleKey, context) => {
     }
 };
 
+const extractBlobNameFromUrl = (url, containerName) => {
+    const raw = (url || '').toString().trim();
+    if (!raw) return '';
+    try {
+        const parsed = new URL(raw);
+        const pathParts = parsed.pathname.split('/').filter(Boolean);
+        const containerIndex = pathParts.indexOf(containerName);
+        if (containerIndex >= 0) {
+            return pathParts.slice(containerIndex + 1).join('/');
+        }
+        return pathParts.slice(1).join('/');
+    } catch {
+        const parts = raw.split('/').filter(Boolean);
+        const containerIndex = parts.indexOf(containerName);
+        if (containerIndex >= 0) {
+            return parts.slice(containerIndex + 1).join('/');
+        }
+        return parts[parts.length - 1] || '';
+    }
+};
+
+const deleteBlobIfPresent = async (containerName, blobName, failures, kind, targetId) => {
+    const normalized = (blobName || '').toString().trim();
+    if (!normalized) return false;
+    try {
+        await deleteBlob(containerName, normalized);
+        return true;
+    } catch (error) {
+        const message = error?.message || String(error);
+        if (!/not found/i.test(message) && error?.statusCode !== 404 && error?.code !== 404) {
+            failures.push({ stage: kind, targetId, message });
+        }
+        return false;
+    }
+};
+
+const buildDeleteJobProgress = (job) => {
+    const totalSteps = Number(job?.totalSteps || 0);
+    const stepsCompleted = Number(job?.stepsCompleted || 0);
+    return totalSteps > 0 ? Math.round((stepsCompleted / totalSteps) * 100) : 0;
+};
+
+const updateDeleteJob = async (jobRecord, patch = {}) => {
+    const next = {
+        ...jobRecord,
+        ...patch,
+        lastUpdated: new Date().toISOString()
+    };
+    if (!next.ttl) next.ttl = JOB_TTL_SECONDS;
+    await upsertItem(CONTAINER_JOBS, next);
+    return next;
+};
+
+const buildDeleteJobRecord = (referenceId) => ({
+    id: `job_${referenceId}_delete_${Date.now()}`,
+    referenceId,
+    type: 'delete-reference',
+    status: 'initializing',
+    totalSteps: 5,
+    stepsCompleted: 0,
+    currentStep: 0,
+    currentStepLabel: 'Preparing rollback plan',
+    progress: 0,
+    stepResults: [],
+    error: null,
+    startedAt: new Date().toISOString(),
+    ttl: JOB_TTL_SECONDS
+});
+
+const runDeleteStep = async (jobRecord, stepNumber, label, runStep) => {
+    let nextJob = await updateDeleteJob(jobRecord, {
+        status: 'processing',
+        currentStep: stepNumber,
+        currentStepLabel: label,
+        progress: buildDeleteJobProgress(jobRecord)
+    });
+
+    const outcome = await runStep();
+    const result = {
+        step: stepNumber,
+        label,
+        ok: !(Array.isArray(outcome?.failures) && outcome.failures.length > 0),
+        failures: Array.isArray(outcome?.failures) ? outcome.failures : [],
+        stats: outcome?.stats || {}
+    };
+
+    nextJob = await updateDeleteJob(nextJob, {
+        stepsCompleted: stepNumber,
+        progress: Math.round((stepNumber / (nextJob.totalSteps || 1)) * 100),
+        stepResults: [...(Array.isArray(nextJob.stepResults) ? nextJob.stepResults : []), result]
+    });
+
+    if (!result.ok) {
+        const error = new Error(`Rollback stopped at step ${stepNumber}: ${label}`);
+        error.details = result;
+        throw error;
+    }
+
+    return nextJob;
+};
+
+const processDeleteReferenceJob = async (jobRecord, context) => {
+    let currentJob = jobRecord;
+    try {
+        const reference = await getItem(CONTAINER_NAME, jobRecord.referenceId, jobRecord.referenceId);
+        if (!reference) {
+            await updateDeleteJob(currentJob, {
+                status: 'error',
+                currentStepLabel: 'Reference not found',
+                error: 'Reference not found',
+                completedAt: new Date().toISOString(),
+                progress: buildDeleteJobProgress(currentJob)
+            });
+            return;
+        }
+
+        const pages = await queryItems(CONTAINER_PAGES, {
+            query: 'SELECT * FROM c WHERE c.referenceId = @referenceId ORDER BY c.pageNumber',
+            parameters: [{ name: '@referenceId', value: reference.id }]
+        });
+        const pageList = Array.isArray(pages) ? pages : [];
+        const files = Array.isArray(reference.files) ? reference.files : [];
+        const openai = getOpenAiClient();
+        const { doiKey, titleKey } = getReferenceKeys(reference);
+
+        currentJob = await runDeleteStep(currentJob, 1, 'Removing vector store entries and OpenAI files', async () => {
+            const failures = [];
+            const stats = { vectorStoreEntriesDeleted: 0, openAiFilesDeleted: 0, pagesFound: pageList.length };
+
+            for (const page of pageList) {
+                const vectorStoreId = page?.openaiVector?.vectorStoreId || reference?.kb_vector_store_id || process.env.OPENAI_VECTOR_STORE;
+                const vectorStoreFileId = page?.openaiVector?.vectorStoreFileId;
+                const fileId = page?.openaiVector?.fileId;
+
+                if (openai && vectorStoreId && vectorStoreFileId) {
+                    try {
+                        await openai.vectorStores.files.del(vectorStoreId, vectorStoreFileId);
+                        stats.vectorStoreEntriesDeleted += 1;
+                    } catch (error) {
+                        const message = error?.message || String(error);
+                        if (!/not found/i.test(message) && error?.status !== 404 && error?.statusCode !== 404) {
+                            failures.push({ stage: 'vector_store_file', targetId: vectorStoreFileId, message });
+                        }
+                    }
+                }
+
+                if (openai && fileId) {
+                    try {
+                        await openai.files.del(fileId);
+                        stats.openAiFilesDeleted += 1;
+                    } catch (error) {
+                        const message = error?.message || String(error);
+                        if (!/not found/i.test(message) && error?.status !== 404 && error?.statusCode !== 404) {
+                            failures.push({ stage: 'openai_file', targetId: fileId, message });
+                        }
+                    }
+                }
+            }
+
+            return { failures, stats };
+        });
+
+        currentJob = await runDeleteStep(currentJob, 2, 'Deleting split page blobs from storage', async () => {
+            const failures = [];
+            const stats = { pageBlobsDeleted: 0, pagesFound: pageList.length };
+
+            for (const page of pageList) {
+                const deletedBlob = await deleteBlobIfPresent(
+                    BLOB_CONTAINER_PAGES,
+                    page?.blobName || extractBlobNameFromUrl(page?.blobUrl, BLOB_CONTAINER_PAGES),
+                    failures,
+                    'page_blob',
+                    page?.id
+                );
+                if (deletedBlob) stats.pageBlobsDeleted += 1;
+            }
+
+            return { failures, stats };
+        });
+
+        currentJob = await runDeleteStep(currentJob, 3, 'Deleting uploaded source documents from storage', async () => {
+            const failures = [];
+            const stats = { uploadBlobsDeleted: 0, filesFound: files.length };
+
+            for (const file of files) {
+                const deletedBlob = await deleteBlobIfPresent(
+                    BLOB_CONTAINER_UPLOADS,
+                    file?.blobName || extractBlobNameFromUrl(file?.url, BLOB_CONTAINER_UPLOADS),
+                    failures,
+                    'upload_blob',
+                    file?.blobName || file?.url || file?.name || reference.id
+                );
+                if (deletedBlob) stats.uploadBlobsDeleted += 1;
+            }
+
+            return { failures, stats };
+        });
+
+        currentJob = await runDeleteStep(currentJob, 4, 'Deleting page records from CosmosDB', async () => {
+            const failures = [];
+            const stats = { pageRecordsDeleted: 0, pagesFound: pageList.length };
+
+            for (const page of pageList) {
+                try {
+                    await deleteItem(CONTAINER_PAGES, page.id, page.id);
+                    stats.pageRecordsDeleted += 1;
+                } catch (error) {
+                    failures.push({ stage: 'page_record', targetId: page?.id, message: error?.message || String(error) });
+                }
+            }
+
+            return { failures, stats };
+        });
+
+        currentJob = await runDeleteStep(currentJob, 5, 'Deleting reference record from CosmosDB', async () => {
+            const failures = [];
+            const stats = { referenceDeleted: 0, shortlistUpdated: 0 };
+
+            try {
+                await removeFromShortlistByKeys(doiKey, titleKey, context);
+                stats.shortlistUpdated = 1;
+            } catch (error) {
+                failures.push({ stage: 'shortlist_cleanup', targetId: reference.id, message: error?.message || String(error) });
+            }
+
+            if (failures.length === 0) {
+                try {
+                    await deleteItem(CONTAINER_NAME, reference.id, reference.id);
+                    stats.referenceDeleted = 1;
+                } catch (error) {
+                    failures.push({ stage: 'reference_record', targetId: reference.id, message: error?.message || String(error) });
+                }
+            }
+
+            return { failures, stats };
+        });
+
+        await updateDeleteJob(currentJob, {
+            status: 'complete',
+            currentStep: currentJob.totalSteps,
+            currentStepLabel: 'Deletion complete',
+            progress: 100,
+            completedAt: new Date().toISOString(),
+            error: null
+        });
+    } catch (error) {
+        await updateDeleteJob(currentJob, {
+            status: 'error',
+            currentStepLabel: currentJob.currentStepLabel || 'Deletion failed',
+            progress: buildDeleteJobProgress(currentJob),
+            completedAt: new Date().toISOString(),
+            error: error?.message || String(error)
+        });
+        context?.error?.('Delete Reference Job Error:', error);
+    }
+};
+
 // GET /api/references - Get all references
 app.http('GetReferences', {
     methods: ['GET'],
@@ -194,6 +457,111 @@ app.http('GetReferences', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to load references', details: error.message })
+            };
+        }
+    }
+});
+
+// POST /api/references/delete-job/{jobId}/run - Execute a reference deletion job
+app.http('RunDeleteReferenceJob', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'references/delete-job/{jobId}/run',
+    handler: async (request, context) => {
+        try {
+            const jobId = request.params.jobId;
+            const job = await getItem(CONTAINER_JOBS, jobId, jobId);
+            if (!job) {
+                return {
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Job not found' })
+                };
+            }
+
+            if (job.type !== 'delete-reference') {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Job is not a reference deletion job' })
+                };
+            }
+
+            if (job.status === 'processing') {
+                return {
+                    status: 202,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ success: true, message: 'Delete job already running', jobId })
+                };
+            }
+
+            if (job.status === 'complete') {
+                return {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ success: true, message: 'Delete job already complete', jobId })
+                };
+            }
+
+            await processDeleteReferenceJob(job, context);
+            return {
+                status: 202,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ success: true, message: 'Delete job started', jobId })
+            };
+        } catch (error) {
+            context.error('Run Delete Reference Job Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to run delete job', details: error.message })
+            };
+        }
+    }
+});
+
+// GET /api/references/delete-job/{jobId} - Get reference deletion job status
+app.http('GetDeleteReferenceJob', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'references/delete-job/{jobId}',
+    handler: async (request, context) => {
+        try {
+            const jobId = request.params.jobId;
+            const job = await getItem(CONTAINER_JOBS, jobId, jobId);
+            if (!job) {
+                return {
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Job not found' })
+                };
+            }
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    jobId: job.id,
+                    referenceId: job.referenceId,
+                    type: job.type,
+                    status: job.status,
+                    totalSteps: job.totalSteps || 0,
+                    stepsCompleted: job.stepsCompleted || 0,
+                    currentStep: job.currentStep || 0,
+                    currentStepLabel: job.currentStepLabel || '',
+                    progress: typeof job.progress === 'number' ? job.progress : buildDeleteJobProgress(job),
+                    stepResults: Array.isArray(job.stepResults) ? job.stepResults : [],
+                    startedAt: job.startedAt,
+                    completedAt: job.completedAt,
+                    error: job.error || null
+                })
+            };
+        } catch (error) {
+            context.error('Get Delete Reference Job Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to get delete job status', details: error.message })
             };
         }
     }
@@ -850,22 +1218,39 @@ app.http('DeleteReference', {
     handler: async (request, context) => {
         try {
             const id = request.params.id;
-            
-            await deleteItem(CONTAINER_NAME, id, id);
-            
-            context.log(`Deleted reference: ${id}`);
+            const reference = await getItem(CONTAINER_NAME, id, id);
+            if (!reference) {
+                return {
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Reference not found' })
+                };
+            }
+
+            let jobRecord = buildDeleteJobRecord(id);
+            jobRecord = await createItem(CONTAINER_JOBS, jobRecord);
+            context.log(`Created delete job: ${jobRecord.id} for reference ${id}`);
             
             return {
-                status: 200,
+                status: 202,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ success: true, message: 'Reference deleted' })
+                body: JSON.stringify({
+                    success: true,
+                    message: 'Reference deletion started',
+                    referenceId: id,
+                    jobId: jobRecord.id
+                })
             };
         } catch (error) {
             context.error('Delete Reference Error:', error);
             return {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ error: 'Failed to delete reference', details: error.message })
+                body: JSON.stringify({
+                    error: 'Failed to delete reference',
+                    details: error.message,
+                    cleanup: error?.details || null
+                })
             };
         }
     }
