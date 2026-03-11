@@ -1,9 +1,11 @@
 const { app } = require('@azure/functions');
-const { queryItems } = require('../../shared/cosmosClient');
+const crypto = require('crypto');
+const { queryItems, getItem, upsertItem } = require('../../shared/cosmosClient');
 
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const WIKICFP_SEARCH_BASE = 'http://www.wikicfp.com/cfp/servlet/tool.search';
 const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
+const CFP_SETTINGS_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const KB_REFERENCE_FILTER_CLAUSE = 'c.ref_knowledge_status = 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
 const KB_REFERENCE_QUERY = `SELECT c.id, c.keywords, c.tags, c.discipline, c.frameworks, c.concepts, c.journal, c.source, c.publisher FROM c WHERE ${KB_REFERENCE_FILTER_CLAUSE}`;
 const MAX_KB_QUERY_TERMS = 10;
@@ -77,6 +79,86 @@ const URGENCY_ORDER = [
 
 let cachedPayload = null;
 let cacheWrittenAt = 0;
+
+function base64UrlEncode(value) {
+    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    return buf
+        .toString('base64')
+        .replace(/=/g, '')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_');
+}
+
+function base64UrlDecodeToString(value) {
+    const s = (value || '').toString().replace(/-/g, '+').replace(/_/g, '/');
+    const pad = '='.repeat((4 - (s.length % 4)) % 4);
+    return Buffer.from(s + pad, 'base64').toString('utf8');
+}
+
+function getAuthUser(request) {
+    try {
+        const header = request.headers.get('authorization') || '';
+        const m = header.match(/^Bearer\s+(.+)$/i);
+        if (!m) return null;
+
+        const token = m[1];
+        const parts = token.split('.');
+        if (parts.length !== 3) return null;
+
+        const [headerB64, payloadB64, sigB64] = parts;
+        const data = `${headerB64}.${payloadB64}`;
+        const secret = process.env.AUTH_JWT_SECRET || 'dev-secret-change-me';
+
+        const expectedSig = base64UrlEncode(
+            crypto.createHmac('sha256', secret).update(data).digest()
+        );
+        if (expectedSig !== sigB64) return null;
+
+        const payloadJson = base64UrlDecodeToString(payloadB64);
+        const payload = JSON.parse(payloadJson);
+        if (payload?.exp && payload.exp < Date.now() / 1000) return null;
+        if (!payload?.email) return null;
+        return payload;
+    } catch {
+        return null;
+    }
+}
+
+function getDismissalsDocId(email) {
+    const normalized = (email || '').toString().trim().toLowerCase();
+    return `cfp_dismissals_${normalized}`;
+}
+
+function normalizeDismissedIds(ids) {
+    const raw = Array.isArray(ids) ? ids : [];
+    return Array.from(new Set(raw.map((value) => (value || '').toString()).filter(Boolean)));
+}
+
+async function readDismissalsForUser(email) {
+    const docId = getDismissalsDocId(email);
+    const existing = await getItem(CFP_SETTINGS_CONTAINER, docId, docId);
+    const dismissedIds = normalizeDismissedIds(existing?.dismissedIds);
+    return {
+        docId,
+        existing,
+        dismissedIds
+    };
+}
+
+async function writeDismissalsForUser(email, nextIds, previous) {
+    const docId = getDismissalsDocId(email);
+    const nowIso = new Date().toISOString();
+    const baseCreatedAt = previous?.createdAt || nowIso;
+    const payload = {
+        id: docId,
+        type: 'cfp_dismissals',
+        userEmail: (email || '').toString().trim().toLowerCase(),
+        dismissedIds: normalizeDismissedIds(nextIds),
+        updatedAt: nowIso,
+        createdAt: baseCreatedAt
+    };
+    return upsertItem(CFP_SETTINGS_CONTAINER, payload);
+}
 
 function splitCandidateValues(value) {
     if (Array.isArray(value)) return value.flatMap(splitCandidateValues);
@@ -401,6 +483,85 @@ app.http('GetCFPs', {
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to load CFPs', details: error.message })
+            };
+        }
+    }
+});
+
+app.http('GetDismissedCFPs', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'cfp/dismissed',
+    handler: async (request, context) => {
+        try {
+            const authUser = getAuthUser(request);
+            const email = authUser?.email || '';
+            if (!email) {
+                return {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Unauthorized' })
+                };
+            }
+
+            const { dismissedIds } = await readDismissalsForUser(email);
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dismissedIds })
+            };
+        } catch (error) {
+            context.error('GetDismissedCFPs Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to retrieve dismissed CFPs', details: error.message })
+            };
+        }
+    }
+});
+
+app.http('AddDismissedCFPs', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'cfp/dismissed',
+    handler: async (request, context) => {
+        try {
+            const authUser = getAuthUser(request);
+            const email = authUser?.email || '';
+            if (!email) {
+                return {
+                    status: 401,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Unauthorized' })
+                };
+            }
+
+            const body = await request.json().catch(() => ({}));
+            const incomingIds = normalizeDismissedIds(body?.dismissedIds || (body?.id ? [body.id] : []));
+            if (incomingIds.length === 0) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'dismissedIds is required' })
+                };
+            }
+
+            const { existing, dismissedIds } = await readDismissalsForUser(email);
+            const merged = normalizeDismissedIds([...dismissedIds, ...incomingIds]);
+            await writeDismissalsForUser(email, merged, existing);
+
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ dismissedIds: merged })
+            };
+        } catch (error) {
+            context.error('AddDismissedCFPs Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to store dismissed CFPs', details: error.message })
             };
         }
     }
