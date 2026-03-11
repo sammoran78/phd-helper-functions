@@ -124,18 +124,15 @@ function getAuthUser(request) {
     }
 }
 
-function getDismissalsDocId(email) {
-    const normalized = (email || '').toString().trim().toLowerCase();
-    return `cfp_dismissals_${normalized}`;
-}
+const GLOBAL_DISMISSALS_DOC_ID = 'cfp_dismissals_global';
 
 function normalizeDismissedIds(ids) {
     const raw = Array.isArray(ids) ? ids : [];
     return Array.from(new Set(raw.map((value) => (value || '').toString()).filter(Boolean)));
 }
 
-async function readDismissalsForUser(email) {
-    const docId = getDismissalsDocId(email);
+async function readGlobalDismissals() {
+    const docId = GLOBAL_DISMISSALS_DOC_ID;
     const existing = await getItem(CFP_SETTINGS_CONTAINER, docId, docId);
     const dismissedIds = normalizeDismissedIds(existing?.dismissedIds);
     return {
@@ -145,14 +142,13 @@ async function readDismissalsForUser(email) {
     };
 }
 
-async function writeDismissalsForUser(email, nextIds, previous) {
-    const docId = getDismissalsDocId(email);
+async function writeGlobalDismissals(nextIds, previous) {
+    const docId = GLOBAL_DISMISSALS_DOC_ID;
     const nowIso = new Date().toISOString();
     const baseCreatedAt = previous?.createdAt || nowIso;
     const payload = {
         id: docId,
-        type: 'cfp_dismissals',
-        userEmail: (email || '').toString().trim().toLowerCase(),
+        type: 'cfp_dismissals_global',
         dismissedIds: normalizeDismissedIds(nextIds),
         updatedAt: nowIso,
         createdAt: baseCreatedAt
@@ -494,17 +490,7 @@ app.http('GetDismissedCFPs', {
     route: 'cfp/dismissed',
     handler: async (request, context) => {
         try {
-            const authUser = getAuthUser(request);
-            const email = authUser?.email || '';
-            if (!email) {
-                return {
-                    status: 401,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ error: 'Unauthorized' })
-                };
-            }
-
-            const { dismissedIds } = await readDismissalsForUser(email);
+            const { dismissedIds } = await readGlobalDismissals();
             return {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
@@ -527,16 +513,6 @@ app.http('AddDismissedCFPs', {
     route: 'cfp/dismissed',
     handler: async (request, context) => {
         try {
-            const authUser = getAuthUser(request);
-            const email = authUser?.email || '';
-            if (!email) {
-                return {
-                    status: 401,
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ error: 'Unauthorized' })
-                };
-            }
-
             const body = await request.json().catch(() => ({}));
             const incomingIds = normalizeDismissedIds(body?.dismissedIds || (body?.id ? [body.id] : []));
             if (incomingIds.length === 0) {
@@ -547,9 +523,9 @@ app.http('AddDismissedCFPs', {
                 };
             }
 
-            const { existing, dismissedIds } = await readDismissalsForUser(email);
+            const { existing, dismissedIds } = await readGlobalDismissals();
             const merged = normalizeDismissedIds([...dismissedIds, ...incomingIds]);
-            await writeDismissalsForUser(email, merged, existing);
+            await writeGlobalDismissals(merged, existing);
 
             return {
                 status: 200,
