@@ -1,0 +1,627 @@
+PhD Research - Wide Survey
+
+
+Start of Block: Policy #1
+
+tdm_awareness Before today, how informed did you feel about current AI/copyright policy debates in your own country?
+o	Very informed  (1) 
+o	Somewhat informed  (3) 
+o	Not very informed  (4) 
+o	Not at all informed  (5) 
+o	Unsure  (2) 
+
+
+ 
+
+preferred_permissiom In principle, how should copyrighted creative work be handled for AI training or similar large-scale model development?
+o	Allowed only through opt-in licensing  (2) 
+o	Allowed through opt-out systems if creators are clearly informed  (3) 
+o	Allowed only through collective/industry licensing with payment  (4) 
+o	Allowed only for limited internal/non-public systems  (5) 
+o	Allowed under existing law without additional permission  (6) 
+o	Unsure / no clear view  (7) 
+o	Never  (8) 
+
+
+
+ai_training_accept Which conditions would matter most in making AI training or reuse of creative work acceptable to you?  (Select up to 3).
+▢	Clear prior permission / consent  (1) 
+▢	Fair payment or royalties  (2) 
+▢	Ongoing attribution / traceability  (3) 
+▢	Transparency about what was used and by whom  (4) 
+▢	Ability to opt in or out project-by-project  (5) 
+▢	Limits on style imitation / derivative mimicry  (6) 
+▢	Use only in closed/internal systems  (7) 
+▢	Independent auditing / enforcement  (8) 
+▢	None of these would make it acceptable  (9) 
+▢	Unsure  (10) 
+
+
+Page Break	
+ 
+ 
+
+derivative_works If there were guaranteed new revenue streams for creative workers through fair mechanisms  (e.g. compensation, transparent royalty system, copyright retainment etc)...  How would this affect your willingness to allow AI-generated derivative works that clearly build on your work? (e.g. remixes, fan fiction, style-based images or arrangements)
+o	Much less willing  (1) 
+o	Slightly less willing  (2) 
+o	No change  (3) 
+o	Slightly more willing  (4) 
+o	Much more willing  (5) 
+o	Unsure/I don't know  (6) 
+
+
+
+ai_support_structure Which support structures are most needed right now for creative workers dealing with AI? (Select up to 2). 
+▢	Standard contract clauses  (1) 
+▢	Clear labelling / disclosure standards  (2) 
+▢	Guidance on rates and pricing  (3) 
+▢	Ethical training / practical education  (4) 
+▢	Legal protection from style mimicry  (5) 
+▢	Better licensing / consent systems  (6) 
+▢	Better attribution / provenance standards  (7) 
+▢	Dispute resolution / enforcement mechanisms  (8) 
+▢	None / unsure  (9) 
+
+End of Block: Policy #1
+
+Start of Block: Introduction - Jan 20, 2026
+
+intro Creative Workers &   Generative AI  A survey on client-driven practice, agency, and labour.     We're investigating how AI is actually impacting the daily lives of creative workers:  ...benefits, challenges, and mixed outcomes.     This survey is confidential.   	Your data is anonymous & aggregated. (Time required: less than 10min)   
+
+End of Block: Introduction - Jan 20, 2026
+
+Start of Block: Demographics - Jan 20, 2026
+ 
+
+country In which country do you currently reside?
+▼ Australia (9) ... Zimbabwe (1357)
+
+
+
+age A little about you: Age Band 
+o	18-24  (1) 
+o	25-34  (2) 
+o	35-44  (3) 
+o	45-54  (4) 
+o	55-64  (5) 
+o	65+  (6) 
+o	Prefer not to say  (7) 
+
+
+
+gender A little about you: Gender 
+o	Female  (1) 
+o	Male  (2) 
+o	Non-binary / Third gender  (3) 
+o	Prefer not to say  (4) 
+
+End of Block: Demographics - Jan 20, 2026
+
+Start of Block: Creative Workers Screener
+
+client_work_screener In the last 12 months, have you done paid creative work? (This includes freelance, commissioned, in-house, salaried, contract, or project-based creative work.)
+o	Yes, regularly (most months)  (1) 
+o	Yes, occasionally (a few projects)  (2) 
+o	Not in the last 12 months  (3) 
+o	I only create for myself / unpaid / speculative work  (4) 
+
+
+Display this question:
+If In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Not in the last 12 months
+Or In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = I only create for myself / unpaid / speculative work
+
+create_future_intent Do you expect to be providing paid Creative Work in the next 12 months?
+o	Yes  (1) 
+o	No  (2) 
+o	Unsure / I don't know  (3) 
+
+End of Block: Creative Workers Screener
+
+Start of Block: Hobbyists AI Sentiment
+
+Q102 Hobbysist sentiment quesiton
+	Click to write Scale Point 1 (1)	Click to write Scale Point 2 (2)	Click to write Scale Point 3 (3)
+Click to write Statement 1 (1) 	o		o		o	
+Click to write Statement 2 (2) 	o		o		o	
+Click to write Statement 3 (3) 	o		o		o	
+
+
+End of Block: Hobbyists AI Sentiment
+
+Start of Block: The Basics - Jan 20, 2026
+
+sector Which creative worlds do you inhabit? 
+▢	Music & Sound (composer, songwriter, sound designer, mixing etc)  (1) 
+▢	Screen Content (editor, colourist, director, cinematographer, VFX etc)  (2) 
+▢	Production Office (producer, line producer, prod. manager)  (3) 
+▢	Design / Visual Comm (graphic designer, illustrator, motion designer etc)  (4) 
+▢	Interactive / Experiential (game designer, UX, installation artist)  (5) 
+▢	Writing (author, scriptwriter, journalist etc)  (6) 
+▢	Performance (actor, voiceover, live performer)  (7) 
+
+
+Carry Forward Selected Choices from "Which creative worlds do you inhabit? "
+ 
+
+primary_sector Which Creative Sector would you consider your primary area?  (Please select one)
+o	Music & Sound (composer, songwriter, sound designer, mixing etc)  (1) 
+o	Screen Content (editor, colourist, director, cinematographer, VFX etc)  (2) 
+o	Production Office (producer, line producer, prod. manager)  (3) 
+o	Design / Visual Comm (graphic designer, illustrator, motion designer etc)  (4) 
+o	Interactive / Experiential (game designer, UX, installation artist)  (5) 
+o	Writing (author, scriptwriter, journalist etc)  (6) 
+o	Performance (actor, voiceover, live performer)  (7) 
+
+
+Display this question:
+If In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, regularly (most months)
+Or In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, occasionally (a few projects)
+
+work_context How is your creative work usually structured?
+▢	Freelance contractor / Self-employed  (1) 
+▢	Staff at a Creative Org (Agency / Studio / Production Co. etc)  (2) 
+▢	In-house Creative (at non-creative org)  (3) 
+▢	Mixed Income (Artistic practice + Commissions)  (4) 
+
+
+Display this question:
+If In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, regularly (most months)
+Or In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, occasionally (a few projects)
+
+work_balance Roughly what proportion of your creative work is for clients? 
+o	Nearly all (75–100% client work)  (1) 
+o	Mostly client work (50–75%)  (2) 
+o	Mixed (about 50/50)  (3) 
+o	Mostly self-initiated work  (4) 
+o	Nearly all self-initiated  (5) 
+
+
+
+career_stage Roughly speaking, where are you in your career journey? 
+o	Emerging (< 5 years professional)  (1) 
+o	Early-mid (5–10 years)  (2) 
+o	Established (10+ years)  (3) 
+
+End of Block: The Basics - Jan 20, 2026
+
+Start of Block: The Future & Policy - Jan 20, 2026
+Display this question:
+If In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, regularly (most months)
+Or In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, occasionally (a few projects)
+
+future_replacement_share Thinking about the kind of client work you do now, how much of it do you think could be replaced by AI tools in future? 
+o	None or very little (0–10%)  (1) 
+o	Some of it (around 25%)  (2) 
+o	About half (around 50%)  (3) 
+o	Most of it (around 75%)  (4) 
+o	Almost all or all of it (75–100%)  (5) 
+
+
+
+overall_outlook Overall, how do you expect AI to impact your field for creative workers in the next 5–10 years?
+o	Strongly net positive  (1) 
+o	Somewhat net positive  (2) 
+o	Mixed / hard to say  (3) 
+o	Somewhat net negative  (4) 
+o	Strongly net negative  (5) 
+
+End of Block: The Future & Policy - Jan 20, 2026
+
+Start of Block: Creative Practice (General) - Jan 20, 2026
+
+general_agency Please rate your agreement with the following statements regarding your general creative practice: 
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+On most client projects, I feel I have strong creative control over the final outcome. (1) 	o		o		o		o		o	
+I can push back on client suggestions that don’t align with my professional judgement. (2) 	o		o		o		o		o	
+
+
+End of Block: Creative Practice (General) - Jan 20, 2026
+
+Start of Block: AI Usage - Jan 20, 2026
+Display this question:
+If In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, regularly (most months)
+Or In the last 12 months, have you done paid creative work? (This includes freelance, commissioned,... = Yes, occasionally (a few projects)
+
+ai_usage_filter Have you used generative AI tools in paid creative work in the last 12 months?
+o	Yes, I have.  (1) 
+o	No, I haven't.  (2) 
+
+End of Block: AI Usage - Jan 20, 2026
+
+Start of Block: Creative Agency (AI) - Jan 20, 2026
+
+agency_scale Please rate your agreement with the following statements regarding AI in your workflow: 
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Vision: I can use AI as a tool without losing sight of my own creative vision. (1) 	o		o		o		o		o	
+Fidelity: When AI is part of a project, the final work still feels true to the tone/style I want to express.” (2) 	o		o		o		o		o	
+Attribution: Clients have a clear understanding of which parts are my work versus AI-assisted. (3) 	o		o		o		o		o	
+Income: Using AI has generally improved my earning potential. (4) 	o		o		o		o		o	
+Wellbeing: Using AI has generally improved my work-life balance. (5) 	o		o		o		o		o	
+
+
+
+
+client_rates When AI is used, what usually happens to your fee? 
+o	Clients expect it to be cheaper  (1) 
+o	Fees stay about the same  (2) 
+o	I can sometimes charge more (e.g. for technical expertise)  (3) 
+o	It varies too much to say  (4) 
+
+End of Block: Creative Agency (AI) - Jan 20, 2026
+
+Start of Block: AI_Areas
+
+ai_stage_use In your paid creative work, at what stage do you mainly use generative AI?
+o	early ideation / brainstorming  (1) 
+o	drafting / generating first versions  (2) 
+o	revision / refinement / polishing  (3) 
+o	admin / planning / communication  (4) 
+o	final-output elements  (5) 
+o	across multiple stages equally  (6) 
+
+
+
+ai_main_benefit What is the main benefit you get from using generative AI in your paid work?
+o	saves time / improves efficiency  (1) 
+o	improves creative quality  (2) 
+o	improves both quality and efficiency  (3) 
+o	helps me meet deadlines or workload demands  (4) 
+o	helps me do work I otherwise could not do alone  (5) 
+o	mainly helps with admin / support tasks  (6) 
+
+
+
+ai_current_uses Which best describes your current use of generative AI in paid work?
+o	fully optional: I use it only when I want to  (1) 
+o	strategic: I use it when it clearly helps the job  (2) 
+o	expected: it is becoming hard not to use  (3) 
+o	pressured: clients/workplace/market increasingly push me to use it  (4) 
+o	embedded: my workflow would now be difficult without it  (5) 
+
+
+
+ai_mostly_changed Overall, do you think generative AI has changed your paid work mostly by:
+o	improving efficiency more than quality  (1) 
+o	improving quality more than efficiency  (2) 
+o	improving both about equally  (3) 
+o	changing neither very much  (4) 
+o	making some aspects easier but lowering quality or originality  (5) 
+
+
+
+ai_frequency Over the next 12 months, do you expect your use of generative AI in paid work to:
+o	increase  (1) 
+o	stay about the same  (2) 
+o	decrease  (3) 
+o	unsure  (4) 
+
+
+Display this question:
+If Over the next 12 months, do you expect your use of generative AI in paid work to: = increase
+
+ai_frequency_increas Is that mainly because you:
+o	want to explore its creative value  (1) 
+o	think it will become necessary for efficiency  (2) 
+o	think clients/markets will increasingly expect it  (3) 
+o	think competitors are gaining advantage from it  (4) 
+o	think your workplace or collaborators will push more use  (5) 
+
+
+Display this question:
+If Over the next 12 months, do you expect your use of generative AI in paid work to: = stay about the same
+
+ai_frequency_same Is that mainly because:
+o	it is useful, but only for certain tasks  (1) 
+o	I want to keep control over how much I use it  (2) 
+o	I do not currently need more of it  (3) 
+o	I have mixed feelings about its value  (4) 
+o	current client/workplace expectations are stable  (5) 
+
+
+Display this question:
+If Over the next 12 months, do you expect your use of generative AI in paid work to: = decrease
+
+ai_frequency_decreas Is that mainly because:
+o	I do not think it improves quality enough  (1) 
+o	I am concerned about originality or authorship  (2) 
+o	I prefer working without it  (3) 
+o	client/workplace needs do not justify it  (4) 
+o	I have ethical or licensing concerns  (5) 
+
+End of Block: AI_Areas
+
+Start of Block: AI Non-User Perspectives - Jan 20, 2026
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = No, I haven't.
+
+non_user_reasons If you haven’t used AI on client work… why not? 
+▢	I don’t trust the quality of AI outputs  (1) 
+▢	Ethical or copyright concerns  (2) 
+▢	Client contracts or NDAs prohibit it  (3) 
+▢	Union/guild guidelines discourage it  (4) 
+▢	I don’t know the tools well enough yet  (5) 
+▢	I haven’t needed it / no clear benefit  (6) 
+▢	Other  (7) 
+
+
+
+future_intent Do you expect to use generative AI on paid client work in the next 12 months? 
+o	Yes  (1) 
+o	Maybe / Not sure  (2) 
+o	No  (3) 
+
+
+Display this question:
+If Do you expect to use generative AI on paid client work in the next 12 months? = Yes
+Or Do you expect to use generative AI on paid client work in the next 12 months? = Maybe / Not sure
+
+future_intent_reaso  Do you expect to use generative AI in future mainly because you want to, or because you may need to?
+o	mostly want to  (1) 
+o	mostly need to  (2) 
+o	both equally  (3) 
+o	I don't know/unsure  (4) 
+
+
+Display this question:
+If Do you expect to use generative AI in future mainly because you want to, or because you may need to? = mostly want to
+
+future_wants_to What most attracts you?
+o	exploring creative possibilities  (1) 
+o	improving quality  (2) 
+o	experimenting with new workflows  (3) 
+o	curiosity / professional development  (4) 
+
+
+Display this question:
+If Do you expect to use generative AI in future mainly because you want to, or because you may need to? = mostly need to
+
+future_needs_to What most drives that feeling?
+o	clients/market expectations  (1) 
+o	competitors are using it  (2) 
+o	efficiency pressures  (3) 
+o	workplace expectations  (4) 
+o	concern about being left behind  (5) 
+
+End of Block: AI Non-User Perspectives - Jan 20, 2026
+
+Start of Block: Labor Conditions - Jan 20, 2026
+
+client_disclosure How often do clients ask if you've used AI? 
+o	Never  (1) 
+o	Occasionally  (2) 
+o	Often  (3) 
+o	Almost always  (4) 
+
+
+
+precarity Which of these have you experienced in the last 12 months? 
+▢	Unpaid overtime / crunch  (1) 
+▢	Pressure to deliver 'more for the same money'  (2) 
+▢	Feeling unable to say no to unpaid extra work  (3) 
+▢	Clients assuming work is easy because of 'just using AI'  (4) 
+▢	Budgets shrinking / Rate erosion  (5) 
+▢	Instability of contracts  (6) 
+▢	None of the above  (7) 
+
+
+
+pressure_matrix Please rate your agreement: 
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Overall Pressure: In the last 12 months, the rise of AI has increased pressure on my work conditions (deadlines, rates, expectations). (1) 	o		o		o		o		o	
+Work Outlook: I am concerned that AI tools will reduce the availability of paid work in my field over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+
+lost_work_ai In the last 12 months, have you lost paid client work because of AI tools? 
+o	Yes – at least one job/brief was clearly replaced by AI  (1) 
+o	Maybe – it’s hard to be sure, but I suspect so  (2) 
+o	No – not that I’m aware of  (3) 
+
+End of Block: Labor Conditions - Jan 20, 2026
+
+Start of Block: Music & Sound Workers
+Display this question:
+If Which creative worlds do you inhabit? = Music & Sound (composer, songwriter, sound designer, mixing etc)
+ 
+
+music_ai_sentiment  Thinking about your Music & Sound work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of creative work in the Music/Sound sector that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in the Music/Sound sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Music & Sound (composer, songwriter, sound designer, mixing etc)
+
+music_ai_models Which AI Music/Sound tools have you used in your creative practice?
+▢	Song Generators (Suno, Udio, ElevenLabs Music, Riffusion, Mureka etc)  (1) 
+▢	Instrumental Backings (Soundraw, AIVA, Beaten.ai, Mubert, Loudly etc.)  (2) 
+▢	Stem/Source Separators (Moises, UVR, Lalal.ai, RipX etc)  (3) 
+▢	Mixing/Mastering AI assist (iZotope, LANDR, BandLab Mastering, CloudBounce etc)  (4) 
+▢	Voice/Dialogue Generators (Text-to-Speech, Elevenlabs, Descript, Adobe Enhance Speech etc)  (5) 
+▢	Sound Effects/FX Generators  (6) 
+▢	Transcription (Speech-to-Text, Whisper etc)  (7) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (8) 
+▢	Other  (9) __________________________________________________
+
+
+Page Break	
+ 
+End of Block: Music & Sound Workers
+
+Start of Block: Screen Workers
+Display this question:
+If Which creative worlds do you inhabit? = Screen Content (editor, colourist, director, cinematographer, VFX etc)
+ 
+
+screen_ai_sentiment Thinking about your Screen sector work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of Screen sector creative work that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in the Screen sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Screen Content (editor, colourist, director, cinematographer, VFX etc)
+
+screen_ai_models Which AI tools have you used in your Screen/Video creative practice?
+▢	AI Editing Assist (Descript, FireCut, OpusClip, CapCut AI)  (1) 
+▢	AI Orchestrators/Workflow Management (ComfyUI etc)  (2) 
+▢	VFX & Inpainting (Higgsfield, Adobe Firefly Video, Wonder Studio etc)  (3) 
+▢	Chinese Video-Generators (Kling, Vidu, Seedance, HunyuanVideo, Wan etc)  (4) 
+▢	Western Video-Generators (Sora, Veo, Runway, Pika, Firefly Video, etc)  (5) 
+▢	Upscaling & Restoration (Topaz Video AI, Pixop)  (6) 
+▢	Music/Song Generators (Suno, Udio, ElevenLabs Music, Riffusion, Mureka etc)  (7) 
+▢	Speech-to-Text (ElevenLabs, etc)  (8) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (9) 
+▢	Other  (10) __________________________________________________
+
+End of Block: Screen Workers
+
+Start of Block: Production Office Workers
+Display this question:
+If Which creative worlds do you inhabit? = Production Office (producer, line producer, prod. manager)
+ 
+
+prod_ai_sentiment Thinking about your Production Sector work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of creative work in Production that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in the Production sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Production Office (producer, line producer, prod. manager)
+
+production_ai_models Which AI tools have you used in your (Production) creative practice?
+▢	Project & Task Management (Asana AI, Notion AI, Monday.com AI etc)  (2) 
+▢	Budgeting / Costing Assistants (FinalBit, LTX Studio ad planner, Excel/Sheets with Copilot etc)  (1) 
+▢	Call Sheet / Crew & Cast Management (StudioBinder, Notion AI templates, Filmustage reports etc)  (5) 
+▢	Asset / File Management & Summaries (Notion AI, Microsoft Copilot, Superhuman etc)  (6) 
+▢	Script Breakdown / Scheduling AI (Filmustage, FinalBit, StudioBinder Scheduling, Movie Magic + AI plugins etc)  (7) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (8) 
+▢	Other  (9) __________________________________________________
+
+End of Block: Production Office Workers
+
+Start of Block: Design / Visual Comm Workers
+Display this question:
+If Which creative worlds do you inhabit? = Design / Visual Comm (graphic designer, illustrator, motion designer etc)
+ 
+
+design_ai_sentiment Thinking about your Image/Design & Visual Comms. work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of creative work in Design/Visuals sector that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in the Design/Visuals sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Design / Visual Comm (graphic designer, illustrator, motion designer etc)
+
+design_ai_models Which AI Visual tools have you used in your creative practice?
+▢	Image Models (Midjourney, Nano Banana, Adobe Firefly etc)  (1) 
+▢	Design Platform AI (Canva Magic Studio, Figma AI, Adobe Express)  (2) 
+▢	Typography & Branding (Ideogram, Kittl, Khroma for color palettes)  (3) 
+▢	UI/UX Specialized (onbeacon AI, Framer AI, Uizard)  (4) 
+▢	3D / Product Visualisation Tools (Sloyd, Scenario, Meshy etc)  (5) 
+▢	Video / Motion Graphics from Stills (Runway, Pika, Luma Ray/Dream Machine, Veo etc)  (6) 
+▢	Adobe Creative Suite AI Tools / Photoshop (Generative Fill) etc  (7) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (8) 
+▢	Other  (9) __________________________________________________
+
+End of Block: Design / Visual Comm Workers
+
+Start of Block: Interactive / Experiential Workers
+Display this question:
+If Which creative worlds do you inhabit? = Interactive / Experiential (game designer, UX, installation artist)
+ 
+
+interactive_ai_sent  Thinking about your Interactive/Experiential work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of creative work that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in my sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Interactive / Experiential (game designer, UX, installation artist)
+
+interactive_ai_model Which AI Interactive tools have you used in your creative practice?
+▢	Game Art / Asset Generators (Scenario, Stable Diffusion, Midjourney, Leonardo etc)  (1) 
+▢	Spatial & 3D Generators (Luma AI / Imagine 3D, Spline AI, Meshy)  (2) 
+▢	Interactive Narrative / Branching Story Tools (Charisma.ai, Virti, Mursion, Talespin)  (3) 
+▢	Conversational NPCs/Agents (Inworld AI, Convai, Character.ai for prototypes)  (4) 
+▢	UX / Interface Prototyping Assistants (Figma AI, Framer AI, Uizard, Lovable etc)  (5) 
+▢	Ai Coding Agents (Claude Code, Codex, Cursor, Windsurf etc.)  (6) 
+▢	Analytics / Personalisation Engines (Mixpanel AI, Amplitude AI, recommendation engines etc)  (7) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (8) 
+▢	Other  (9) __________________________________________________
+
+End of Block: Interactive / Experiential Workers
+
+Start of Block: Writing Workers
+Display this question:
+If Which creative worlds do you inhabit? = Writing (author, scriptwriter, journalist etc)
+ 
+
+writers_ai_sentiment Thinking about your Writing sector work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of creative work that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in my sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Writing (author, scriptwriter, journalist etc)
+
+writer_ai_models Which AI Writing tools have you used in your creative practice?
+▢	Journalistic Research & Fact-Checking (Perplexity AI, Consensus, NotebookLM)  (1) 
+▢	SEO & Marketing Copy (Copy.ai, Frase, NightOwl)  (2) 
+▢	Drafting / Rewriting Assistants (Microsoft Copilot in Word, Notion AI, Sudowrite, Jasper etc)  (3) 
+▢	Ideas / Outlines / Story Structure Tools (Notion AI, Copilot, Sudowrite story planner etc)  (4) 
+▢	Transcription / Note-taking (Otter.ai, Notta, Whisper-based tools, Zoom AI Companion etc)  (5) 
+▢	Image Model Visualisation (Midjourney, Nano Banana, Adobe Firefly etc)  (6) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (7) 
+▢	Other  (8) __________________________________________________
+
+End of Block: Writing Workers
+
+Start of Block: Performance Workers
+Display this question:
+If Which creative worlds do you inhabit? = Performance (actor, voiceover, live performer)
+ 
+
+performance_ai_senti Thinking about your Performance sector work ONLY, to what extent do you agree with the following statements?
+	Strongly disagree (1)	Somewhat disagree (2)	Neither agree nor disagree (3)	Somewhat agree (4)	Strongly agree (5)
+Gen-AI will enable new forms of creative work that weren’t previously practical. (1) 	o		o		o		o		o	
+I expect generative AI to substantially reduce paid opportunities in my sector over the next 5 years. (2) 	o		o		o		o		o	
+
+
+
+Display this question:
+If Have you used generative AI tools in paid creative work in the last 12 months? = Yes, I have.
+And Which creative worlds do you inhabit? = Performance (actor, voiceover, live performer)
+
+performance_ai_model Which AI 'Performance' tools have you used in your creative practice?
+▢	Vocal Training & Analysis (Voice123 AI analysis, Voicemod)  (1) 
+▢	Script Analysis & Dramaturgy (Causality, Scriptation AI for breakdown)  (2) 
+▢	Virtual Rehearsal & Auditioning (WeAudition AI partners, Rehearsal Pro)  (3) 
+▢	Virtual Performers / Avatars (VTube Studio, Animaze, Ready Player Me, Luma Ray3 avatars etc)  (4) 
+▢	Voice/Dialogue Generators (Text-to-Speech, Elevenlabs, Descript, Adobe Enhance Speech etc)  (5) 
+▢	Rehearsal / Script Partner Tools (ChatGPT voice, Gemini Live, AI-powered rehearsal apps etc)  (6) 
+▢	Show Control / Cueing Assistants (QLab scripting with AI helpers, Notion/Sheets + Copilot cue planners etc)  (7) 
+▢	LLMs (ChatGPT, Gemini, Claude etc)  (8) 
+▢	Other  (9) __________________________________________________
+
+End of Block: Performance Workers
+
+
