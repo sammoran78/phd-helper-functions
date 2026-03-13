@@ -7,7 +7,7 @@ const { app } = require('@azure/functions');
 const AdmZip = require('adm-zip');
 
 const QUALTRICS_API_TOKEN = process.env.QUALTRICS_API_TOKEN;
-const QUALTRICS_DATA_CENTER = process.env.QUALTRICS_DATA_CENTER || 'sjc1';
+const QUALTRICS_DATA_CENTER = process.env.QUALTRICS_DATA_CENTER || process.env.QUALTRICS_DATACENTER || 'sjc1';
 const QUALTRICS_SURVEY_ID = process.env.QUALTRICS_SURVEY_ID;
 
 function buildQualtricsHeaders() {
