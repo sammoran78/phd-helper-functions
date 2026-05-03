@@ -3,6 +3,10 @@ const { downloadBlob } = require('../../shared/blobClient');
 const { extractTextFromBuffer } = require('../../shared/textExtractor');
 const OpenAI = require('openai');
 
+function supportsCustomTemperature(model) {
+    return !/^(gpt-5|o\d|o-)/i.test(model || '');
+}
+
 // POST /api/references/analyze - Analyze a document with OpenAI
 app.http('AnalyzeReference', {
     methods: ['POST'],
@@ -132,16 +136,21 @@ ${text.substring(0, 15000)}`
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
             const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
             
-            const completion = await openai.chat.completions.create({
+            const completionOptions = {
                 model: model,
                 messages: [
                     { role: 'system', content: 'You are an academic research assistant helping to analyze scholarly papers.' },
                     { role: 'user', content: prompt }
                 ],
                 response_format: { type: 'json_object' },
-                max_completion_tokens: 1500,
-                temperature: 0.3
-            });
+                max_completion_tokens: 1500
+            };
+
+            if (supportsCustomTemperature(model)) {
+                completionOptions.temperature = 0.3;
+            }
+
+            const completion = await openai.chat.completions.create(completionOptions);
             
             const result = completion.choices[0]?.message?.content || '';
             
