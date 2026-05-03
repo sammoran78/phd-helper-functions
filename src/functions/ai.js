@@ -7,6 +7,18 @@ const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'refer
 const CONTAINER_CHATS = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
 const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
 
+function requiresDefaultTemperature(model) {
+    const normalized = (model || '').toString().trim().toLowerCase();
+    if (/^(o\d|o-)/.test(normalized)) return true;
+
+    const match = normalized.match(/^gpt-(\d+)(?:\.(\d+))?/);
+    if (!match) return false;
+
+    const major = Number(match[1]);
+    const minor = Number(match[2] || 0);
+    return major > 5 || (major === 5 && minor >= 5);
+}
+
 // POST /api/ai/chat - Generic OpenAI chat completion
 app.http('AIChat', {
     methods: ['POST'],
@@ -43,7 +55,7 @@ app.http('AIChat', {
                 model: model,
                 messages: messages,
                 max_completion_tokens: max_tokens,
-                temperature: temperature
+                temperature: requiresDefaultTemperature(model) ? 1 : temperature
             });
             
             const content = completion.choices[0]?.message?.content || '';
