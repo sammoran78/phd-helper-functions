@@ -19,6 +19,21 @@ function requiresDefaultTemperature(model) {
     return major > 5 || (major === 5 && minor >= 5);
 }
 
+function getChatCompletionContent(completion) {
+    const message = completion?.choices?.[0]?.message;
+    const content = message?.content;
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content.map(item => {
+            if (typeof item === 'string') return item;
+            if (typeof item?.text === 'string') return item.text;
+            if (typeof item?.content === 'string') return item.content;
+            return '';
+        }).join('').trim();
+    }
+    return '';
+}
+
 // POST /api/ai/chat - Generic OpenAI chat completion
 app.http('AIChat', {
     methods: ['POST'],
@@ -48,19 +63,21 @@ app.http('AIChat', {
             
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
             const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+            const useDefaultTemperature = requiresDefaultTemperature(model);
+            const completionTokenLimit = useDefaultTemperature ? Math.max(Number(max_tokens) || 500, 1500) : max_tokens;
             
             context.log(`[AI Chat] Calling OpenAI with ${messages.length} messages`);
             
             const completion = await openai.chat.completions.create({
                 model: model,
                 messages: messages,
-                max_completion_tokens: max_tokens,
-                temperature: requiresDefaultTemperature(model) ? 1 : temperature
+                max_completion_tokens: completionTokenLimit,
+                temperature: useDefaultTemperature ? 1 : temperature
             });
             
-            const content = completion.choices[0]?.message?.content || '';
+            const content = getChatCompletionContent(completion);
             
-            context.log(`[AI Chat] Response received: ${content.length} chars`);
+            context.log(`[AI Chat] Response received: ${content.length} chars; finish_reason=${completion.choices?.[0]?.finish_reason || 'unknown'}`);
             
             return {
                 status: 200,
