@@ -1,3 +1,7 @@
+const { app } = require('@azure/functions');
+
+app.setup({ enableHttpStream: true });
+
 require('./functions/references');
 require('./functions/analyze');
 require('./functions/upload');

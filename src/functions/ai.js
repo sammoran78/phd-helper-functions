@@ -6,6 +6,7 @@ const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const CONTAINER_CHATS = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
 const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 const SYSTEM_PROMPT_CACHE_MS = parsePositiveInt(process.env.KB_SYSTEM_PROMPT_CACHE_MS, 60000);
 const KB_RAG_MAX_HISTORY_MESSAGES = parsePositiveInt(process.env.KB_RAG_MAX_HISTORY_MESSAGES, 6);
 const KB_RAG_MAX_HISTORY_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_HISTORY_CHARS, 6000);
@@ -26,6 +27,26 @@ let cachedSystemPrompt = {
 function parsePositiveInt(value, fallback) {
     const parsed = Number.parseInt(value, 10);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function withCorsHeaders(response) {
+    return {
+        ...response,
+        headers: {
+            ...(response?.headers || {}),
+            'Access-Control-Allow-Origin': CORS_ORIGIN,
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept',
+            'Access-Control-Max-Age': '86400'
+        }
+    };
+}
+
+function corsPreflightResponse() {
+    return withCorsHeaders({
+        status: 204,
+        headers: {}
+    });
 }
 
 function requiresDefaultTemperature(model) {
@@ -623,11 +644,13 @@ async function resolveCitationsForContent(content, context) {
 }
 
 app.http('KBRagChat', {
-    methods: ['POST'],
+    methods: ['POST', 'OPTIONS'],
     authLevel: 'anonymous',
     route: 'kb/rag-chat',
     handler: async (request, context) => {
         try {
+            if (request.method === 'OPTIONS') return corsPreflightResponse();
+
             const requestStartedAt = Date.now();
             const body = await request.json();
             const query = (body?.query || body?.message || '').toString().trim();
@@ -637,38 +660,38 @@ app.http('KBRagChat', {
             const systemPrompt = await getSystemPrompt(context);
 
             if (!query) {
-                return {
+                return withCorsHeaders({
                     status: 400,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'query is required' })
-                };
+                });
             }
 
             if (!process.env.OPENAI_API_KEY) {
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'OpenAI API key not configured' })
-                };
+                });
             }
 
             const vectorStoreId = process.env.OPENAI_VECTOR_STORE;
             if (!vectorStoreId) {
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'OPENAI_VECTOR_STORE environment variable not configured' })
-                };
+                });
             }
 
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
             const model = (process.env.OPENAI_MODEL || '').toString().trim();
             if (!model) {
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'OPENAI_MODEL environment variable not configured' })
-                };
+                });
             }
 
             let historyText = '';
@@ -732,7 +755,7 @@ app.http('KBRagChat', {
                 unresolvedCitationIds: unresolvedCitationIds.length
             });
 
-            return {
+            return withCorsHeaders({
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -741,24 +764,26 @@ app.http('KBRagChat', {
                     unresolvedCitationIds,
                     vectorStoreId: vectorStoreId
                 })
-            };
+            });
         } catch (error) {
             context.error('[KB RAG Chat] Error:', error);
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'KB RAG request failed', details: error.message })
-            };
+            });
         }
     }
 });
 
 app.http('KBRagChatStream', {
-    methods: ['POST'],
+    methods: ['POST', 'OPTIONS'],
     authLevel: 'anonymous',
     route: 'kb/rag-chat/stream',
     handler: async (request, context) => {
         try {
+            if (request.method === 'OPTIONS') return corsPreflightResponse();
+
             const requestStartedAt = Date.now();
             const body = await request.json();
             const query = (body?.query || body?.message || '').toString().trim();
@@ -768,37 +793,37 @@ app.http('KBRagChatStream', {
             const systemPrompt = await getSystemPrompt(context);
 
             if (!query) {
-                return {
+                return withCorsHeaders({
                     status: 400,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'query is required' })
-                };
+                });
             }
 
             if (!process.env.OPENAI_API_KEY) {
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'OpenAI API key not configured' })
-                };
+                });
             }
 
             const vectorStoreId = process.env.OPENAI_VECTOR_STORE;
             if (!vectorStoreId) {
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'OPENAI_VECTOR_STORE environment variable not configured' })
-                };
+                });
             }
 
             const model = (process.env.OPENAI_MODEL || '').toString().trim();
             if (!model) {
-                return {
+                return withCorsHeaders({
                     status: 500,
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ error: 'OPENAI_MODEL environment variable not configured' })
-                };
+                });
             }
 
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -943,7 +968,7 @@ app.http('KBRagChatStream', {
                 }
             });
 
-            return {
+            return withCorsHeaders({
                 status: 200,
                 enableContentNegotiation: false,
                 headers: {
@@ -952,14 +977,14 @@ app.http('KBRagChatStream', {
                     'Connection': 'keep-alive'
                 },
                 body: stream
-            };
+            });
         } catch (error) {
             context.error('[KB RAG Chat Stream] Error:', error);
-            return {
+            return withCorsHeaders({
                 status: 500,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'KB RAG stream setup failed', details: error.message })
-            };
+            });
         }
     }
 });
