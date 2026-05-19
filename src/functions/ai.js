@@ -6,6 +6,26 @@ const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
 const CONTAINER_REFERENCES = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const CONTAINER_CHATS = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
 const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
+const SYSTEM_PROMPT_CACHE_MS = parsePositiveInt(process.env.KB_SYSTEM_PROMPT_CACHE_MS, 60000);
+const KB_RAG_MAX_HISTORY_MESSAGES = parsePositiveInt(process.env.KB_RAG_MAX_HISTORY_MESSAGES, 6);
+const KB_RAG_MAX_HISTORY_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_HISTORY_CHARS, 6000);
+const KB_RAG_MAX_USER_MESSAGE_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_USER_MESSAGE_CHARS, 1800);
+const KB_RAG_MAX_ASSISTANT_MESSAGE_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_ASSISTANT_MESSAGE_CHARS, 1200);
+const KB_RAG_MAX_QUERY_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_QUERY_CHARS, 4000);
+const KB_RAG_MAX_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_MAX_OUTPUT_TOKENS, 1400);
+const KB_RAG_FILE_SEARCH_MAX_RESULTS = parsePositiveInt(process.env.KB_RAG_FILE_SEARCH_MAX_RESULTS, 8);
+const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 8);
+const KB_RAG_STREAM_HEARTBEAT_MS = parsePositiveInt(process.env.KB_RAG_STREAM_HEARTBEAT_MS, 15000);
+
+let cachedSystemPrompt = {
+    value: '',
+    loadedAt: 0
+};
+
+function parsePositiveInt(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function requiresDefaultTemperature(model) {
     const normalized = (model || '').toString().trim().toLowerCase();
@@ -117,6 +137,122 @@ function getOutputText(response) {
         }
     }
     return texts.join('\n').trim();
+}
+
+function truncateText(value, maxChars) {
+    const text = (value || '').toString().trim();
+    if (!text) return '';
+    if (!Number.isFinite(maxChars) || maxChars <= 0 || text.length <= maxChars) return text;
+    return `${text.slice(0, Math.max(maxChars - 1, 1)).trimEnd()}…`;
+}
+
+function collapseWhitespace(value) {
+    return (value || '').toString().replace(/\s+/g, ' ').trim();
+}
+
+function stripCitationMarkers(value) {
+    return (value || '')
+        .toString()
+        .replace(/\{\{cite:[^}]+\}\}/g, '')
+        .replace(/[\u3010]\d+(?::\d+)?[\u2020\u2021][^\u3011]*[\u3011]/g, '')
+        .trim();
+}
+
+function normalizeComparableText(value) {
+    return collapseWhitespace(stripCitationMarkers(value)).toLowerCase();
+}
+
+function sanitizeHistoryMessage(message) {
+    const role = (message?.role || 'user').toString().toLowerCase();
+    const maxChars = role === 'assistant' ? KB_RAG_MAX_ASSISTANT_MESSAGE_CHARS : KB_RAG_MAX_USER_MESSAGE_CHARS;
+    const content = truncateText(stripCitationMarkers(message?.content || ''), maxChars);
+    return {
+        role,
+        content
+    };
+}
+
+function buildConversationHistory(chat, currentQuery) {
+    if (!chat || !Array.isArray(chat.messages) || chat.messages.length === 0) {
+        return '';
+    }
+
+    const normalizedQuery = normalizeComparableText(currentQuery);
+    const recent = chat.messages.slice(-KB_RAG_MAX_HISTORY_MESSAGES);
+    const selected = [];
+    let totalChars = 0;
+    let skippedDuplicateCurrentQuery = false;
+
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+        const sanitized = sanitizeHistoryMessage(recent[i]);
+        if (!sanitized.content) continue;
+
+        if (!skippedDuplicateCurrentQuery && sanitized.role === 'user' && normalizedQuery && normalizeComparableText(sanitized.content) === normalizedQuery) {
+            skippedDuplicateCurrentQuery = true;
+            continue;
+        }
+
+        const line = `${sanitized.role.toUpperCase()}: ${sanitized.content}`;
+        if (selected.length > 0 && (totalChars + line.length + 1) > KB_RAG_MAX_HISTORY_CHARS) {
+            break;
+        }
+
+        selected.push(line);
+        totalChars += line.length + 1;
+    }
+
+    return selected.reverse().join('\n');
+}
+
+function buildRagInstructions(systemPrompt) {
+    return [
+        '=== MANDATORY CITATION FORMAT ===',
+        'EVERY claim you make that is supported by file_search results MUST include a citation marker in the EXACT form {{cite:FILE_ID}} immediately after the sentence.',
+        'FILE_ID is the OpenAI file id (starts with "file-") from the file_search results.',
+        'Example: "Photography transformed painting practices in the 1850s.{{cite:file-abc123}}"',
+        '=== END MANDATORY FORMAT ===',
+        '',
+        systemPrompt,
+        '',
+        '--- LITERATURE REVIEW MODE ---',
+        'You are a literature review assistant working over the user\'s academic corpus.',
+        'Prefer synthesis over exhaustiveness: answer the exact question first, then compare positions, methods, or tensions only when they help.',
+        'Keep the answer compact unless the user explicitly asks for a long treatment.',
+        'Do not reveal chain-of-thought. Provide conclusions, evidence, and uncertainty directly.',
+        'If the corpus does not support a claim, say so plainly instead of inferring beyond the sources.',
+        '',
+        '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
+        'Answer using ONLY the provided file_search results from the user\'s academic corpus.',
+        'When you reference, quote, paraphrase, or summarise information from a source, you MUST append {{cite:FILE_ID}} immediately after the relevant sentence.',
+        'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
+        'If you cannot find a supporting source in the file_search results, do NOT cite anything.',
+        'IMPORTANT: Do NOT omit citation markers. Every referenced source MUST have at least one {{cite:FILE_ID}} marker.',
+        '--- END CITATION RULES ---'
+    ].filter(Boolean).join('\n');
+}
+
+function buildRagInput(query, historyText) {
+    const trimmedQuery = truncateText((query || '').toString().trim(), KB_RAG_MAX_QUERY_CHARS);
+    return [
+        historyText ? `Recent conversation context:\n${historyText}` : '',
+        `User question:\n${trimmedQuery}`
+    ].filter(Boolean).join('\n\n');
+}
+
+function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, query }) {
+    return {
+        model,
+        instructions: buildRagInstructions(systemPrompt),
+        input: buildRagInput(query, historyText),
+        max_output_tokens: KB_RAG_MAX_OUTPUT_TOKENS,
+        tools: [
+            {
+                type: 'file_search',
+                vector_store_ids: [vectorStoreId],
+                max_num_results: KB_RAG_FILE_SEARCH_MAX_RESULTS
+            }
+        ]
+    };
 }
 
 function extractCitationIds(text) {
@@ -360,6 +496,9 @@ function buildApa7Fallback(reference) {
 
 async function getSystemPrompt(context) {
     if (!SYSTEM_PROMPT_DOC_ID) return '';
+    if (cachedSystemPrompt.loadedAt > 0 && (Date.now() - cachedSystemPrompt.loadedAt) < SYSTEM_PROMPT_CACHE_MS) {
+        return cachedSystemPrompt.value;
+    }
     try {
         let doc = await getItem(CONTAINER_CHATS, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
         if (!doc) {
@@ -370,7 +509,12 @@ async function getSystemPrompt(context) {
             doc = Array.isArray(matches) ? matches[0] : null;
         }
         const raw = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
-        return (raw || '').toString().replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
+        const resolved = (raw || '').toString().replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
+        cachedSystemPrompt = {
+            value: resolved,
+            loadedAt: Date.now()
+        };
+        return resolved;
     } catch (err) {
         if (context?.warn) {
             context.warn('[KB RAG] Failed to load system prompt', err?.message || String(err));
@@ -441,17 +585,14 @@ async function lookupCitationByFileId(fileId, options = {}) {
 async function resolveCitationsForContent(content, context) {
     const options = arguments[2] || {};
     const citationIds = extractCitationIds(content);
-    const citations = [];
-
-    for (const fileId of citationIds.slice(0, 12)) {
+    const citations = (await Promise.all(citationIds.slice(0, KB_RAG_MAX_CITATIONS).map(async (fileId) => {
         try {
-            const citation = await lookupCitationByFileId(fileId, { ...options, context });
-            if (citation) citations.push(citation);
+            return await lookupCitationByFileId(fileId, { ...options, context });
         } catch (error) {
             context?.warn?.(`[KB RAG] Citation resolution failed for ${fileId}:`, error?.message || String(error));
-            citations.push(buildCitationRecord(fileId, {}, { resolutionStatus: 'resolution_error' }));
+            return buildCitationRecord(fileId, {}, { resolutionStatus: 'resolution_error' });
         }
-    }
+    }))).filter(Boolean);
 
     return {
         citations,
@@ -465,6 +606,7 @@ app.http('KBRagChat', {
     route: 'kb/rag-chat',
     handler: async (request, context) => {
         try {
+            const requestStartedAt = Date.now();
             const body = await request.json();
             const query = (body?.query || body?.message || '').toString().trim();
             const chatId = (body?.chatId || '').toString().trim();
@@ -510,49 +652,18 @@ app.http('KBRagChat', {
             let historyText = '';
             if (chatId) {
                 const chat = await getItem(CONTAINER_CHATS, chatId, chatId);
-                if (chat && Array.isArray(chat.messages) && chat.messages.length > 0) {
-                    const recent = chat.messages.slice(-12);
-                    historyText = recent
-                        .map(m => `${(m.role || 'user').toUpperCase()}: ${(m.content || '').toString()}`)
-                        .join('\n');
-                }
+                historyText = buildConversationHistory(chat, query);
             }
 
-            const instructions = [
-                '=== MANDATORY CITATION FORMAT ===',
-                'EVERY claim you make that is supported by file_search results MUST include a citation marker in the EXACT form {{cite:FILE_ID}} immediately after the sentence.',
-                'FILE_ID is the OpenAI file id (starts with "file-") from the file_search results.',
-                'Example: "Photography transformed painting practices in the 1850s.{{cite:file-abc123}}"',
-                '=== END MANDATORY FORMAT ===',
-                '',
-                systemPrompt,
-                '',
-                '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
-                'You are a research assistant. Answer using ONLY the provided file_search results from the user\'s academic corpus.',
-                'When you reference, quote, paraphrase, or summarise information from a source, you MUST append {{cite:FILE_ID}} immediately after the relevant sentence.',
-                'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
-                'If you cannot find a supporting source in the file_search results, do NOT cite anything — just state the claim without a citation marker.',
-                'Keep answers concise but academically rigorous.',
-                'IMPORTANT: Do NOT omit citation markers. Every referenced source MUST have at least one {{cite:FILE_ID}} marker.',
-                '--- END CITATION RULES ---'
-            ].filter(Boolean).join('\n');
-
-            const input = [
-                historyText ? `Conversation so far:\n${historyText}` : '',
-                `User question: ${query}`
-            ].filter(Boolean).join('\n\n');
-
-            const basePayload = {
-                model,
-                instructions,
-                input,
-                tools: [
-                    {
-                        type: 'file_search',
-                        vector_store_ids: [vectorStoreId]
-                    }
-                ]
-            };
+            const basePayload = buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, query });
+            context.log('[KB RAG Chat] Prepared request', {
+                chatId: chatId || null,
+                useReasoning,
+                historyChars: historyText.length,
+                queryChars: query.length,
+                maxOutputTokens: KB_RAG_MAX_OUTPUT_TOKENS,
+                maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
+            });
 
             let response;
             try {
@@ -591,6 +702,12 @@ app.http('KBRagChat', {
             }
 
             const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai });
+            context.log('[KB RAG Chat] Completed', {
+                elapsedMs: Date.now() - requestStartedAt,
+                outputChars: content.length,
+                citations: citations.length,
+                unresolvedCitationIds: unresolvedCitationIds.length
+            });
 
             return {
                 status: 200,
@@ -619,6 +736,7 @@ app.http('KBRagChatStream', {
     route: 'kb/rag-chat/stream',
     handler: async (request, context) => {
         try {
+            const requestStartedAt = Date.now();
             const body = await request.json();
             const query = (body?.query || body?.message || '').toString().trim();
             const chatId = (body?.chatId || '').toString().trim();
@@ -665,49 +783,18 @@ app.http('KBRagChatStream', {
             let historyText = '';
             if (chatId) {
                 const chat = await getItem(CONTAINER_CHATS, chatId, chatId);
-                if (chat && Array.isArray(chat.messages) && chat.messages.length > 0) {
-                    const recent = chat.messages.slice(-12);
-                    historyText = recent
-                        .map(m => `${(m.role || 'user').toUpperCase()}: ${(m.content || '').toString()}`)
-                        .join('\n');
-                }
+                historyText = buildConversationHistory(chat, query);
             }
 
-            const instructions = [
-                '=== MANDATORY CITATION FORMAT ===',
-                'EVERY claim you make that is supported by file_search results MUST include a citation marker in the EXACT form {{cite:FILE_ID}} immediately after the sentence.',
-                'FILE_ID is the OpenAI file id (starts with "file-") from the file_search results.',
-                'Example: "Photography transformed painting practices in the 1850s.{{cite:file-abc123}}"',
-                '=== END MANDATORY FORMAT ===',
-                '',
-                systemPrompt,
-                '',
-                '--- CITATION RULES (OVERRIDE ANY CONFLICTING INSTRUCTIONS ABOVE) ---',
-                'You are a research assistant. Answer using ONLY the provided file_search results from the user\'s academic corpus.',
-                'When you reference, quote, paraphrase, or summarise information from a source, you MUST append {{cite:FILE_ID}} immediately after the relevant sentence.',
-                'ONLY use file IDs that appear in the file_search tool results. NEVER fabricate or guess a file ID.',
-                'If you cannot find a supporting source in the file_search results, do NOT cite anything — just state the claim without a citation marker.',
-                'Keep answers concise but academically rigorous.',
-                'IMPORTANT: Do NOT omit citation markers. Every referenced source MUST have at least one {{cite:FILE_ID}} marker.',
-                '--- END CITATION RULES ---'
-            ].filter(Boolean).join('\n');
-
-            const input = [
-                historyText ? `Conversation so far:\n${historyText}` : '',
-                `User question: ${query}`
-            ].filter(Boolean).join('\n\n');
-
-            const basePayload = {
-                model,
-                instructions,
-                input,
-                tools: [
-                    {
-                        type: 'file_search',
-                        vector_store_ids: [vectorStoreId]
-                    }
-                ]
-            };
+            const basePayload = buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, query });
+            context.log('[KB RAG Stream] Prepared request', {
+                chatId: chatId || null,
+                useReasoning,
+                historyChars: historyText.length,
+                queryChars: query.length,
+                maxOutputTokens: KB_RAG_MAX_OUTPUT_TOKENS,
+                maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
+            });
 
             const { ReadableStream } = require('stream/web');
             const encoder = new TextEncoder();
@@ -726,14 +813,25 @@ app.http('KBRagChatStream', {
                         controller.enqueue(encoder.encode(`\n`));
                     };
 
+                    send('ready', {
+                        status: 'connected',
+                        at: new Date().toISOString()
+                    });
+
+                    const heartbeatId = setInterval(() => {
+                        send('ping', { at: new Date().toISOString() });
+                    }, KB_RAG_STREAM_HEARTBEAT_MS);
+
                     (async () => {
                         let fullText = '';
                         let completedResponse = null;
+                        let firstDeltaAt = 0;
                         try {
                             let openaiStream;
                             try {
                                 openaiStream = await openai.responses.create({
                                     ...basePayload,
+                                    include: ['file_search_call.results'],
                                     stream: true,
                                     ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
                                 });
@@ -749,6 +847,12 @@ app.http('KBRagChatStream', {
 
                             for await (const event of openaiStream) {
                                 if (event?.type === 'response.output_text.delta' && typeof event?.delta === 'string') {
+                                    if (!firstDeltaAt) {
+                                        firstDeltaAt = Date.now();
+                                        context.log('[KB RAG Stream] First delta received', {
+                                            firstDeltaMs: firstDeltaAt - requestStartedAt
+                                        });
+                                    }
                                     fullText += event.delta;
                                     send('delta', event.delta);
                                 }
@@ -770,10 +874,19 @@ app.http('KBRagChatStream', {
                             const { citations, unresolvedCitationIds } = await resolveCitationsForContent(fullText, context, { openai });
 
                             send('done', { content: fullText, citations, unresolvedCitationIds });
+                            context.log('[KB RAG Stream] Completed', {
+                                elapsedMs: Date.now() - requestStartedAt,
+                                firstDeltaMs: firstDeltaAt ? (firstDeltaAt - requestStartedAt) : null,
+                                outputChars: fullText.length,
+                                citations: citations.length,
+                                unresolvedCitationIds: unresolvedCitationIds.length
+                            });
                             controller.close();
                         } catch (err) {
                             send('error', { error: 'KB RAG stream failed', details: err?.message || String(err) });
                             controller.close();
+                        } finally {
+                            clearInterval(heartbeatId);
                         }
                     })();
                 }
