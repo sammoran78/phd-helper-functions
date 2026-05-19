@@ -12,7 +12,8 @@ const KB_RAG_MAX_HISTORY_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_HISTORY
 const KB_RAG_MAX_USER_MESSAGE_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_USER_MESSAGE_CHARS, 1800);
 const KB_RAG_MAX_ASSISTANT_MESSAGE_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_ASSISTANT_MESSAGE_CHARS, 1200);
 const KB_RAG_MAX_QUERY_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_QUERY_CHARS, 4000);
-const KB_RAG_MAX_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_MAX_OUTPUT_TOKENS, 1400);
+const KB_RAG_MAX_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_MAX_OUTPUT_TOKENS, 3200);
+const KB_RAG_DETAILED_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_DETAILED_OUTPUT_TOKENS, 5200);
 const KB_RAG_FILE_SEARCH_MAX_RESULTS = parsePositiveInt(process.env.KB_RAG_FILE_SEARCH_MAX_RESULTS, 8);
 const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 8);
 const KB_RAG_STREAM_HEARTBEAT_MS = parsePositiveInt(process.env.KB_RAG_STREAM_HEARTBEAT_MS, 15000);
@@ -239,19 +240,40 @@ function buildRagInput(query, historyText) {
     ].filter(Boolean).join('\n\n');
 }
 
+function shouldUseDetailedOutputBudget(query) {
+    const normalized = (query || '').toString().toLowerCase();
+    if (!normalized) return false;
+
+    return (
+        normalized.length > 700
+        || /(\bmore detail\b|\bdetailed\b|\bdetail(ed)? reasoning\b|\bstep[- ]by[- ]step\b|\bcompare\b|\bcontrast\b|\bliterature review\b|\bsurvey\b|\bstate of the art\b|\bhow to\b|\bplan\b|\binitiate\b|\bwhy\b|\bexplain\b)/.test(normalized)
+    );
+}
+
+function getRagOutputTokenBudget(query) {
+    return shouldUseDetailedOutputBudget(query)
+        ? Math.max(KB_RAG_MAX_OUTPUT_TOKENS, KB_RAG_DETAILED_OUTPUT_TOKENS)
+        : KB_RAG_MAX_OUTPUT_TOKENS;
+}
+
 function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, query }) {
+    const maxOutputTokens = getRagOutputTokenBudget(query);
     return {
         model,
         instructions: buildRagInstructions(systemPrompt),
         input: buildRagInput(query, historyText),
-        max_output_tokens: KB_RAG_MAX_OUTPUT_TOKENS,
+        max_output_tokens: maxOutputTokens,
         tools: [
             {
                 type: 'file_search',
                 vector_store_ids: [vectorStoreId],
                 max_num_results: KB_RAG_FILE_SEARCH_MAX_RESULTS
             }
-        ]
+        ],
+        metadata: {
+            rag_output_budget: String(maxOutputTokens),
+            rag_profile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard'
+        }
     };
 }
 
@@ -661,7 +683,8 @@ app.http('KBRagChat', {
                 useReasoning,
                 historyChars: historyText.length,
                 queryChars: query.length,
-                maxOutputTokens: KB_RAG_MAX_OUTPUT_TOKENS,
+                maxOutputTokens: basePayload.max_output_tokens,
+                ragProfile: basePayload.metadata?.rag_profile || 'standard',
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
             });
 
@@ -792,7 +815,8 @@ app.http('KBRagChatStream', {
                 useReasoning,
                 historyChars: historyText.length,
                 queryChars: query.length,
-                maxOutputTokens: KB_RAG_MAX_OUTPUT_TOKENS,
+                maxOutputTokens: basePayload.max_output_tokens,
+                ragProfile: basePayload.metadata?.rag_profile || 'standard',
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
             });
 
