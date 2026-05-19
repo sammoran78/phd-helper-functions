@@ -3,6 +3,41 @@ const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_CHATS || 'chats';
 const SYSTEM_PROMPT_DOC_ID = process.env.COSMOSDB_SYSTEM_PROMPT_ID || 'kb_system_prompt';
+const CHAT_MAX_MESSAGES = parsePositiveInt(process.env.CHAT_MAX_MESSAGES, 60);
+const CHAT_MAX_CONTENT_CHARS = parsePositiveInt(process.env.CHAT_MAX_CONTENT_CHARS, 180000);
+const CHAT_MAX_CITATIONS_PER_MESSAGE = parsePositiveInt(process.env.CHAT_MAX_CITATIONS_PER_MESSAGE, 12);
+
+function parsePositiveInt(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function sanitizeMessageForStorage(message) {
+    return {
+        ...message,
+        content: (message?.content || '').toString(),
+        citations: Array.isArray(message?.citations) ? message.citations.slice(0, CHAT_MAX_CITATIONS_PER_MESSAGE) : []
+    };
+}
+
+function trimMessagesForStorage(messages) {
+    const sanitized = (Array.isArray(messages) ? messages : []).map(sanitizeMessageForStorage);
+    const cappedByCount = sanitized.slice(-CHAT_MAX_MESSAGES);
+    const selected = [];
+    let totalChars = 0;
+
+    for (let i = cappedByCount.length - 1; i >= 0; i -= 1) {
+        const msg = cappedByCount[i];
+        const contentChars = (msg.content || '').length;
+        if (selected.length > 0 && (totalChars + contentChars) > CHAT_MAX_CONTENT_CHARS) {
+            break;
+        }
+        selected.push(msg);
+        totalChars += contentChars;
+    }
+
+    return selected.reverse();
+}
 
 // GET /api/chats - Get all chat conversations
 app.http('GetChats', {
@@ -82,13 +117,14 @@ app.http('CreateChat', {
     handler: async (request, context) => {
         try {
             const body = await request.json();
+            const initialMessages = trimMessagesForStorage(body.messages || []);
             
             const newChat = {
                 id: `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                 type: (body.type || 'chat').toString().trim() || 'chat',
                 title: body.title || 'New Conversation',
-                messages: body.messages || [],
-                messageCount: body.messages?.length || 0,
+                messages: initialMessages,
+                messageCount: initialMessages.length,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString()
             };
@@ -132,12 +168,17 @@ app.http('UpdateChat', {
                 };
             }
             
+            const storedMessages = body.messages
+                ? trimMessagesForStorage(body.messages)
+                : trimMessagesForStorage(existing.messages || []);
+
             const updatedChat = {
                 ...existing,
                 ...body,
                 id: id,
                 type: existing.type || body.type || 'chat',
-                messageCount: body.messages?.length || existing.messageCount || 0,
+                messages: storedMessages,
+                messageCount: storedMessages.length,
                 updatedAt: new Date().toISOString()
             };
             
@@ -180,15 +221,15 @@ app.http('AddChatMessage', {
                 };
             }
             
-            const newMessage = {
+            const newMessage = sanitizeMessageForStorage({
                 id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
                 role: body.role || 'user',
                 content: body.content || '',
                 citations: body.citations || [],
                 timestamp: new Date().toISOString()
-            };
+            });
             
-            const messages = [...(existing.messages || []), newMessage];
+            const messages = trimMessagesForStorage([...(existing.messages || []), newMessage]);
             
             const updatedChat = {
                 ...existing,

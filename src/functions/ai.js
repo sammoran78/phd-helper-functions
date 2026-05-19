@@ -850,6 +850,7 @@ app.http('KBRagChatStream', {
                         let fullText = '';
                         let completedResponse = null;
                         let firstDeltaAt = 0;
+                        let streamDeliveredText = false;
                         try {
                             let openaiStream;
                             try {
@@ -878,6 +879,7 @@ app.http('KBRagChatStream', {
                                         });
                                     }
                                     fullText += event.delta;
+                                    streamDeliveredText = true;
                                     send('delta', event.delta);
                                 }
                                 if (event?.type === 'response.completed' && event?.response) {
@@ -895,7 +897,18 @@ app.http('KBRagChatStream', {
                                 }
                             }
 
-                            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(fullText, context, { openai });
+                            let citations = [];
+                            let unresolvedCitationIds = [];
+                            try {
+                                const resolved = await resolveCitationsForContent(fullText, context, { openai });
+                                citations = Array.isArray(resolved?.citations) ? resolved.citations : [];
+                                unresolvedCitationIds = Array.isArray(resolved?.unresolvedCitationIds) ? resolved.unresolvedCitationIds : [];
+                            } catch (citationError) {
+                                context.warn('[KB RAG Stream] Citation resolution failed after content generation; returning content without hydrated citations.', {
+                                    error: citationError?.message || String(citationError),
+                                    outputChars: fullText.length
+                                });
+                            }
 
                             send('done', { content: fullText, citations, unresolvedCitationIds });
                             context.log('[KB RAG Stream] Completed', {
@@ -907,7 +920,21 @@ app.http('KBRagChatStream', {
                             });
                             controller.close();
                         } catch (err) {
-                            send('error', { error: 'KB RAG stream failed', details: err?.message || String(err) });
+                            if (streamDeliveredText && fullText.trim()) {
+                                context.warn('[KB RAG Stream] Stream failed after partial content; returning partial response instead of hard error.', {
+                                    error: err?.message || String(err),
+                                    outputChars: fullText.length
+                                });
+                                send('done', {
+                                    content: fullText,
+                                    citations: [],
+                                    unresolvedCitationIds: [],
+                                    partial: true,
+                                    warning: err?.message || String(err)
+                                });
+                            } else {
+                                send('error', { error: 'KB RAG stream failed', details: err?.message || String(err) });
+                            }
                             controller.close();
                         } finally {
                             clearInterval(heartbeatId);
