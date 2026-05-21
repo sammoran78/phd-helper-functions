@@ -16,7 +16,7 @@ const KB_RAG_MAX_QUERY_CHARS = parsePositiveInt(process.env.KB_RAG_MAX_QUERY_CHA
 const KB_RAG_MAX_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_MAX_OUTPUT_TOKENS, 3200);
 const KB_RAG_DETAILED_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_DETAILED_OUTPUT_TOKENS, 5200);
 const KB_RAG_FILE_SEARCH_MAX_RESULTS = parsePositiveInt(process.env.KB_RAG_FILE_SEARCH_MAX_RESULTS, 8);
-const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 8);
+const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 24);
 const KB_RAG_STREAM_HEARTBEAT_MS = parsePositiveInt(process.env.KB_RAG_STREAM_HEARTBEAT_MS, 15000);
 
 let cachedSystemPrompt = {
@@ -628,7 +628,8 @@ async function lookupCitationByFileId(fileId, options = {}) {
 async function resolveCitationsForContent(content, context) {
     const options = arguments[2] || {};
     const citationIds = extractCitationIds(content);
-    const citations = (await Promise.all(citationIds.slice(0, KB_RAG_MAX_CITATIONS).map(async (fileId) => {
+    const idsToHydrate = citationIds.slice(0, KB_RAG_MAX_CITATIONS);
+    const hydratedCitations = (await Promise.all(idsToHydrate.map(async (fileId) => {
         try {
             return await lookupCitationByFileId(fileId, { ...options, context });
         } catch (error) {
@@ -636,6 +637,12 @@ async function resolveCitationsForContent(content, context) {
             return buildCitationRecord(fileId, {}, { resolutionStatus: 'resolution_error' });
         }
     }))).filter(Boolean);
+
+    const hydratedIds = new Set(hydratedCitations.map(c => c.id));
+    const fallbackCitations = citationIds
+        .filter(fileId => !hydratedIds.has(fileId))
+        .map(fileId => buildCitationRecord(fileId, {}, { resolutionStatus: 'citation_lookup_skipped' }));
+    const citations = [...hydratedCitations, ...fallbackCitations];
 
     return {
         citations,
