@@ -337,6 +337,134 @@ function extractNativeAnnotations(response) {
     return annotations;
 }
 
+function extractFileSearchResultMap(response) {
+    const map = new Map();
+    const output = Array.isArray(response?.output) ? response.output : [];
+
+    for (const item of output) {
+        if (item?.type !== 'file_search_call') continue;
+        const results = Array.isArray(item.results) ? item.results : [];
+        for (const result of results) {
+            const fileId = result?.file_id || result?.fileId || result?.file?.id;
+            if (fileId && !map.has(fileId)) {
+                map.set(fileId, result);
+            }
+        }
+    }
+
+    return map;
+}
+
+function parseDocMetadataFromText(text) {
+    const raw = (text || '').toString();
+    const match = raw.match(/\[DOC_METADATA\]([\s\S]*?)\[\/DOC_METADATA\]/i);
+    if (!match) return {};
+
+    const meta = {};
+    for (const line of match[1].split(/\r?\n/)) {
+        const idx = line.indexOf(':');
+        if (idx === -1) continue;
+        const key = line.slice(0, idx).trim();
+        const value = line.slice(idx + 1).trim();
+        if (key) meta[key] = value;
+    }
+    return meta;
+}
+
+function getFileSearchResultAttributes(result = {}) {
+    return result.attributes
+        || result.file_attributes
+        || result.file?.attributes
+        || result.metadata
+        || {};
+}
+
+function getFileSearchResultFilename(result = {}) {
+    return normalizeCitationText(
+        result.filename
+        || result.file_name
+        || result.name
+        || result.file?.filename
+        || result.file?.name
+    );
+}
+
+async function resolveCitationFromReferencePage(fileId, parsed, options = {}) {
+    if (!fileId || !parsed?.referenceId) return null;
+
+    const pages = await queryItems(CONTAINER_PAGES, {
+        query: 'SELECT TOP 1 * FROM c WHERE c.referenceId = @referenceId AND c.pageNumber = @pageNumber',
+        parameters: [
+            { name: '@referenceId', value: parsed.referenceId },
+            { name: '@pageNumber', value: Number(parsed.pageNumber) }
+        ]
+    });
+
+    const page = Array.isArray(pages) && pages.length > 0 ? pages[0] : null;
+    const reference = await getItem(CONTAINER_REFERENCES, parsed.referenceId, parsed.referenceId);
+    if (!page && !reference) return null;
+
+    return buildCitationRecord(fileId, {
+        referenceId: parsed.referenceId,
+        pageNumber: page?.pageNumber != null ? page.pageNumber : parsed.pageNumber,
+        title: reference?.title || page?.metadata?.title,
+        authors: reference?.authors || reference?.author || page?.metadata?.authors,
+        year: reference?.year || page?.metadata?.year,
+        source: reference?.source || page?.metadata?.source,
+        pageUrl: page?.blobUrl,
+        apa7: reference?.apa7
+    }, {
+        resolutionStatus: options.resolutionStatus || 'resolved_from_reference_page'
+    });
+}
+
+function buildCitationRecordFromFileSearchResult(fileId, result = {}, options = {}) {
+    if (!fileId || !result) return null;
+
+    const attrs = getFileSearchResultAttributes(result);
+    const docMeta = parseDocMetadataFromText(result.text || result.content || result.snippet || '');
+    const filename = getFileSearchResultFilename(result);
+    const parsed = parseReferencePageFromVectorFileName(filename);
+
+    return buildCitationRecord(fileId, {
+        referenceId: attrs.referenceId || attrs.reference_id || docMeta.referenceId || parsed?.referenceId,
+        pageNumber: attrs.pageNumber || attrs.page_number || docMeta.pageNumber || parsed?.pageNumber,
+        title: attrs.title || docMeta.title || filename,
+        authors: attrs.authors || attrs.author || docMeta.authors,
+        year: attrs.year || docMeta.year,
+        source: attrs.source || docMeta.source,
+        pageUrl: attrs.blobUrl || attrs.blob_url || attrs.pageUrl || attrs.page_url,
+        filename
+    }, {
+        resolutionStatus: options.resolutionStatus || 'resolved_from_file_search_result'
+    });
+}
+
+async function resolveCitationFromFileSearchResult(fileId, result = {}, options = {}) {
+    if (!fileId || !result) return null;
+
+    const record = buildCitationRecordFromFileSearchResult(fileId, result, options);
+    if (record?.resolved) return record;
+
+    const attrs = getFileSearchResultAttributes(result);
+    const docMeta = parseDocMetadataFromText(result.text || result.content || result.snippet || '');
+    const filename = getFileSearchResultFilename(result);
+    const parsedFromFilename = parseReferencePageFromVectorFileName(filename);
+    const referenceId = attrs.referenceId || attrs.reference_id || docMeta.referenceId || parsedFromFilename?.referenceId;
+    const rawPageNumber = attrs.pageNumber || attrs.page_number || docMeta.pageNumber || parsedFromFilename?.pageNumber;
+    const pageNumber = Number.parseInt(rawPageNumber, 10);
+
+    if (referenceId && Number.isFinite(pageNumber)) {
+        const fromReferencePage = await resolveCitationFromReferencePage(fileId, { referenceId, pageNumber }, {
+            resolutionStatus: options.resolutionStatus || 'resolved_from_file_search_reference_page'
+        });
+        if (fromReferencePage?.resolved) return fromReferencePage;
+        if (fromReferencePage) return fromReferencePage;
+    }
+
+    return record;
+}
+
 // When the model uses OpenAI's native annotation markers (e.g. 【4:0†source】)
 // instead of our {{cite:FILE_ID}} format, convert them.
 // Also handles position-based injection when start/end indices are available.
@@ -440,6 +568,7 @@ function buildCitationRecord(fileId, source = {}, options = {}) {
     const title = normalizeCitationText(source?.title);
     const sourceLabel = normalizeCitationText(source?.source);
     const pageUrl = normalizeCitationText(source?.pageUrl || source?.blobUrl);
+    const filename = normalizeCitationText(source?.filename);
 
     const resolved = !isPlaceholderCitationValue(authors)
         && !isPlaceholderCitationValue(year)
@@ -451,7 +580,12 @@ function buildCitationRecord(fileId, source = {}, options = {}) {
             const surname = getPrimaryAuthorSurname(authors) || 'Source';
             return `(${surname}, ${year})`;
         })()
-        : fallbackLabel;
+        : (() => {
+            if (!isPlaceholderCitationValue(title) && !isPlaceholderCitationValue(year)) return `(${title}, ${year})`;
+            if (!isPlaceholderCitationValue(title)) return `(${title})`;
+            if (!isPlaceholderCitationValue(filename)) return `(${filename})`;
+            return fallbackLabel;
+        })();
 
     const apa7 = resolved
         ? (normalizeCitationText(source?.apa7) || buildApa7Fallback({ authors, year, title, source: sourceLabel }))
@@ -461,9 +595,9 @@ function buildCitationRecord(fileId, source = {}, options = {}) {
         id: fileId,
         referenceId: source?.referenceId || null,
         pageNumber: source?.pageNumber != null ? String(source.pageNumber) : null,
-        title: resolved ? title : '',
-        authors: resolved ? authors : '',
-        year: resolved ? year : '',
+        title: !isPlaceholderCitationValue(title) ? title : '',
+        authors: !isPlaceholderCitationValue(authors) ? authors : '',
+        year: !isPlaceholderCitationValue(year) ? year : '',
         pageUrl,
         blobUrl: pageUrl,
         apa7,
@@ -569,6 +703,12 @@ async function getSystemPrompt(context) {
 async function lookupCitationByFileId(fileId, options = {}) {
     if (!fileId) return null;
 
+    const fileSearchResult = options?.fileSearchResultMap?.get(fileId);
+    if (fileSearchResult) {
+        const fromSearchResult = await resolveCitationFromFileSearchResult(fileId, fileSearchResult);
+        if (fromSearchResult?.resolved) return fromSearchResult;
+    }
+
     const pages = await queryItems(CONTAINER_PAGES, {
         query: 'SELECT TOP 1 * FROM c WHERE IS_DEFINED(c.openaiVector) AND c.openaiVector.fileId = @fileId',
         parameters: [{ name: '@fileId', value: fileId }]
@@ -577,6 +717,7 @@ async function lookupCitationByFileId(fileId, options = {}) {
     if (!page) {
         const openAiResolved = await resolveCitationFromOpenAiFileRecord(fileId, options);
         if (openAiResolved) return openAiResolved;
+        if (fileSearchResult) return await resolveCitationFromFileSearchResult(fileId, fileSearchResult, { resolutionStatus: 'file_search_result_metadata_incomplete' });
         return buildCitationRecord(fileId, {}, { resolutionStatus: 'page_not_found' });
     }
 
@@ -628,10 +769,11 @@ async function lookupCitationByFileId(fileId, options = {}) {
 async function resolveCitationsForContent(content, context) {
     const options = arguments[2] || {};
     const citationIds = extractCitationIds(content);
+    const fileSearchResultMap = options.fileSearchResultMap || extractFileSearchResultMap(options.response);
     const idsToHydrate = citationIds.slice(0, KB_RAG_MAX_CITATIONS);
     const hydratedCitations = (await Promise.all(idsToHydrate.map(async (fileId) => {
         try {
-            return await lookupCitationByFileId(fileId, { ...options, context });
+            return await lookupCitationByFileId(fileId, { ...options, context, fileSearchResultMap });
         } catch (error) {
             context?.warn?.(`[KB RAG] Citation resolution failed for ${fileId}:`, error?.message || String(error));
             return buildCitationRecord(fileId, {}, { resolutionStatus: 'resolution_error' });
@@ -641,7 +783,13 @@ async function resolveCitationsForContent(content, context) {
     const hydratedIds = new Set(hydratedCitations.map(c => c.id));
     const fallbackCitations = citationIds
         .filter(fileId => !hydratedIds.has(fileId))
-        .map(fileId => buildCitationRecord(fileId, {}, { resolutionStatus: 'citation_lookup_skipped' }));
+        .map(fileId => {
+            const fileSearchResult = fileSearchResultMap.get(fileId);
+            if (fileSearchResult) {
+                return buildCitationRecordFromFileSearchResult(fileId, fileSearchResult, { resolutionStatus: 'citation_lookup_skipped_file_search_result' });
+            }
+            return buildCitationRecord(fileId, {}, { resolutionStatus: 'citation_lookup_skipped' });
+        });
     const citations = [...hydratedCitations, ...fallbackCitations];
 
     return {
@@ -754,7 +902,7 @@ app.http('KBRagChat', {
                 }
             }
 
-            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai });
+            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai, response });
             context.log('[KB RAG Chat] Completed', {
                 elapsedMs: Date.now() - requestStartedAt,
                 outputChars: content.length,
@@ -932,7 +1080,7 @@ app.http('KBRagChatStream', {
                             let citations = [];
                             let unresolvedCitationIds = [];
                             try {
-                                const resolved = await resolveCitationsForContent(fullText, context, { openai });
+                                const resolved = await resolveCitationsForContent(fullText, context, { openai, response: completedResponse });
                                 citations = Array.isArray(resolved?.citations) ? resolved.citations : [];
                                 unresolvedCitationIds = Array.isArray(resolved?.unresolvedCitationIds) ? resolved.unresolvedCitationIds : [];
                             } catch (citationError) {
