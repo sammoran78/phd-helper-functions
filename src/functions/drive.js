@@ -434,6 +434,59 @@ app.http('GetDriveFile', {
     }
 });
 
+// GET /api/drive/file/{id}/raw - Stream the authenticated original for read-only rendering
+app.http('GetDriveFileRaw', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'drive/file/{id}/raw',
+    handler: async (request, context) => {
+        try {
+            const fileId = request.params.id;
+            if (!fileId) {
+                return {
+                    status: 400,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'File ID is required' })
+                };
+            }
+
+            const drive = await getDriveClient();
+            const meta = await drive.files.get({ fileId, fields: 'mimeType, name' });
+            const mimeType = meta?.data?.mimeType;
+            if (mimeType !== DOCX_MIME && mimeType !== 'application/msword' && mimeType !== 'application/pdf') {
+                return {
+                    status: 415,
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ error: 'Raw preview is only available for Word documents and PDFs' })
+                };
+            }
+
+            const response = await drive.files.get(
+                { fileId, alt: 'media' },
+                { responseType: 'arraybuffer' }
+            );
+            const safeName = String(meta?.data?.name || 'document').replace(/["\r\n]/g, '');
+
+            return {
+                status: 200,
+                headers: {
+                    'Content-Type': mimeType,
+                    'Content-Disposition': `inline; filename="${safeName}"`,
+                    'Cache-Control': 'private, max-age=300'
+                },
+                body: Buffer.from(response.data)
+            };
+        } catch (error) {
+            context.error('Get Raw Drive File Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to fetch raw drive file', details: error.message })
+            };
+        }
+    }
+});
+
 // POST /api/drive/upload - Upload a file to Drive
 app.http('UploadToDrive', {
     methods: ['POST'],
