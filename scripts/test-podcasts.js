@@ -138,6 +138,37 @@ async function run() {
     );
     assert.equal(progressed.status, 200);
 
+    const failed = await handlers.get('UpdatePodcastJobProgress')(
+        request({
+            params: { jobId: createdPayload.jobId },
+            body: {
+                status: 'error',
+                progress: 0,
+                stage: 'Audio download failed',
+                error: 'Test failure',
+                notebookId: 'notebook-1',
+                artifactId: 'artifact-1'
+            }
+        }),
+        console
+    );
+    assert.equal(failed.status, 200);
+
+    const resumed = await handlers.get('CreateReferencePodcast')(
+        request({
+            params: { id: reference.id },
+            body: { retry: true }
+        }),
+        console
+    );
+    assert.equal(resumed.status, 202);
+    assert.equal(parseJson(resumed).jobId, createdPayload.jobId);
+    assert.equal(parseJson(resumed).resumed, true);
+
+    const reclaimed = await handlers.get('ClaimPodcastJob')(request(), console);
+    assert.equal(reclaimed.status, 200);
+    assert.equal(parseJson(reclaimed).job.id, createdPayload.jobId);
+
     const audioData = Buffer.from('ID3-test-audio');
     const uploaded = await handlers.get('UploadPodcastJobAudio')(
         request({

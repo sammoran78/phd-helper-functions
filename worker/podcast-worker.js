@@ -206,9 +206,9 @@ async function processJob(claim) {
     // NotebookLM currently delivers AAC audio in an MP4 container.
     const audioPath = path.join(tempDir, 'audio-overview.m4a');
     let client = null;
-    let notebookId = null;
-    let sourceId = null;
-    let artifactId = null;
+    let notebookId = job.notebookId || null;
+    let sourceId = job.sourceId || null;
+    let artifactId = job.artifactId || null;
     let uploaded = false;
 
     try {
@@ -226,54 +226,65 @@ async function processJob(claim) {
         });
         client = await connectMcp();
 
-        const notebook = await callTool(client, 'notebook_create', {
-            title: `PhD Helper Podcast — ${(reference.title || 'Research paper').slice(0, 120)}`
-        });
-        notebookId = findId(notebook, ['notebook_id', 'id']);
-        if (!notebookId) throw new Error('NotebookLM did not return a notebook ID');
-        await reportProgress(job.id, {
-            status: 'processing',
-            progress: 25,
-            stage: 'Temporary NotebookLM notebook created',
-            notebookId
-        });
+        if (notebookId && artifactId) {
+            await reportProgress(job.id, {
+                status: 'generating',
+                progress: 82,
+                stage: 'Resuming the completed NotebookLM audio',
+                notebookId,
+                sourceId,
+                artifactId
+            });
+        } else {
+            const notebook = await callTool(client, 'notebook_create', {
+                title: `PhD Helper Podcast - ${(reference.title || 'Research paper').slice(0, 120)}`
+            });
+            notebookId = findId(notebook, ['notebook_id', 'id']);
+            if (!notebookId) throw new Error('NotebookLM did not return a notebook ID');
+            await reportProgress(job.id, {
+                status: 'processing',
+                progress: 25,
+                stage: 'Temporary NotebookLM notebook created',
+                notebookId
+            });
 
-        const source = await callTool(client, 'source_add', {
-            notebook_id: notebookId,
-            source_type: 'file',
-            file_path: pdfPath,
-            wait: true,
-            wait_timeout: 300
-        });
-        sourceId = findId(source, ['source_id', 'id']);
-        await reportProgress(job.id, {
-            status: 'processing',
-            progress: 40,
-            stage: 'Paper processed by NotebookLM',
-            notebookId,
-            sourceId
-        });
+            const source = await callTool(client, 'source_add', {
+                notebook_id: notebookId,
+                source_type: 'file',
+                file_path: pdfPath,
+                wait: true,
+                wait_timeout: 300
+            });
+            sourceId = findId(source, ['source_id', 'id']);
+            await reportProgress(job.id, {
+                status: 'processing',
+                progress: 40,
+                stage: 'Paper processed by NotebookLM',
+                notebookId,
+                sourceId
+            });
 
-        const created = await callTool(client, 'studio_create', {
-            notebook_id: notebookId,
-            artifact_type: 'audio',
-            source_ids: sourceId ? [sourceId] : null,
-            confirm: true,
-            audio_format: 'deep_dive',
-            audio_length: 'default',
-            language: 'en',
-            focus_prompt: 'Discuss this academic paper clearly and critically, covering its research question, methods, principal findings, limitations, and implications for future research.'
-        });
-        artifactId = findId(created, ['artifact_id', 'id']);
-        if (!artifactId) throw new Error('NotebookLM did not return an audio artifact ID');
-        await reportProgress(job.id, {
-            status: 'generating',
-            progress: 45,
-            stage: 'NotebookLM is creating the two-host discussion',
-            notebookId,
-            sourceId,
-            artifactId
-        });
+            const created = await callTool(client, 'studio_create', {
+                notebook_id: notebookId,
+                artifact_type: 'audio',
+                source_ids: sourceId ? [sourceId] : null,
+                confirm: true,
+                audio_format: 'deep_dive',
+                audio_length: 'default',
+                language: 'en',
+                focus_prompt: 'Discuss this academic paper clearly and critically, covering its research question, methods, principal findings, limitations, and implications for future research.'
+            });
+            artifactId = findId(created, ['artifact_id', 'id']);
+            if (!artifactId) throw new Error('NotebookLM did not return an audio artifact ID');
+            await reportProgress(job.id, {
+                status: 'generating',
+                progress: 45,
+                stage: 'NotebookLM is creating the two-host discussion',
+                notebookId,
+                sourceId,
+                artifactId
+            });
+        }
 
         await waitForAudio(client, job.id, notebookId, artifactId);
         await reportProgress(job.id, {

@@ -141,6 +141,32 @@ app.http('CreateReferencePodcast', {
                     podcast: podcastPayload(reference, existing)
                 });
             }
+            if (retry && existing?.status === 'error' && existing.notebookId && existing.artifactId) {
+                const resumedAt = nowIso();
+                const resumedJob = {
+                    ...existing,
+                    status: 'queued',
+                    progress: Math.max(Number(existing.progress || 0), 75),
+                    stage: 'Waiting for laptop worker to resume audio download',
+                    error: null,
+                    completedAt: null,
+                    leaseExpiresAt: null,
+                    lastUpdated: resumedAt
+                };
+                await upsertItem(JOBS_CONTAINER, resumedJob);
+                const updatedReference = await updatePodcastReference(reference, {
+                    status: resumedJob.status,
+                    progress: resumedJob.progress,
+                    stage: resumedJob.stage,
+                    error: null
+                });
+                return json(202, {
+                    success: true,
+                    resumed: true,
+                    jobId: resumedJob.id,
+                    podcast: podcastPayload(updatedReference, resumedJob)
+                });
+            }
 
             const createdAt = nowIso();
             const job = {
