@@ -92,13 +92,17 @@ async function downloadSource(jobId, destination) {
 
 async function uploadAudio(jobId, audioPath, metadata) {
     const data = await fsp.readFile(audioPath);
+    const extension = path.extname(audioPath).toLowerCase();
+    const contentType = extension === '.m4a' || extension === '.mp4'
+        ? 'audio/mp4'
+        : 'audio/mpeg';
     const response = await apiFetch(`/podcast-worker/jobs/${encodeURIComponent(jobId)}/upload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             fileName: path.basename(audioPath),
             fileData: data.toString('base64'),
-            contentType: 'audio/mpeg',
+            contentType,
             ...metadata
         })
     });
@@ -199,7 +203,8 @@ async function processJob(claim) {
     const { job, reference } = claim;
     const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), `phd-podcast-${job.id}-`));
     const pdfPath = path.join(tempDir, 'paper.pdf');
-    const audioPath = path.join(tempDir, 'audio-overview.mp3');
+    // NotebookLM currently delivers AAC audio in an MP4 container.
+    const audioPath = path.join(tempDir, 'audio-overview.m4a');
     let client = null;
     let notebookId = null;
     let sourceId = null;
