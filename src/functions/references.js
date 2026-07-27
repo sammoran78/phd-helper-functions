@@ -354,7 +354,15 @@ const processDeleteReferenceJob = async (jobRecord, context) => {
             parameters: [{ name: '@referenceId', value: reference.id }]
         });
         const pageList = Array.isArray(pages) ? pages : [];
-        const files = Array.isArray(reference.files) ? reference.files : [];
+        const files = Array.isArray(reference.files) ? [...reference.files] : [];
+        if (reference?.podcast?.blobName || reference?.podcast?.url) {
+            files.push({
+                name: reference.podcast.fileName || 'audio-overview.mp3',
+                blobName: reference.podcast.blobName,
+                url: reference.podcast.url,
+                contentType: reference.podcast.contentType || 'audio/mpeg'
+            });
+        }
         const openai = getOpenAiClient();
         const { doiKey, titleKey } = getReferenceKeys(reference);
 

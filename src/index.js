@@ -20,3 +20,4 @@ require('./functions/journal');
 require('./functions/system-prompt');
 require('./functions/agent');
 require('./functions/cfp');
+require('./functions/podcasts');
