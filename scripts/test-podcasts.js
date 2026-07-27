@@ -187,6 +187,7 @@ async function run() {
     const uploadedPayload = parseJson(uploaded);
     assert.equal(uploadedPayload.podcast.status, 'complete');
     assert.equal(uploadedPayload.podcast.sizeBytes, audioData.length);
+    assert.equal(uploadedPayload.podcast.consumedAt, null);
 
     const status = await handlers.get('GetReferencePodcast')(
         request({ params: { id: reference.id } }),
@@ -200,6 +201,33 @@ async function run() {
     );
     assert.equal(audio.status, 200);
     assert.equal(Buffer.from(audio.body).toString(), audioData.toString());
+
+    const consumed = await handlers.get('MarkReferencePodcastConsumed')(
+        request({
+            params: { id: reference.id },
+            body: { method: 'downloaded' }
+        }),
+        console
+    );
+    assert.equal(consumed.status, 200);
+    const consumedPayload = parseJson(consumed);
+    assert.equal(consumedPayload.podcast.consumedMethod, 'downloaded');
+    assert.ok(consumedPayload.podcast.consumedAt);
+    assert.equal(consumedPayload.alreadyConsumed, false);
+
+    const consumedAgain = await handlers.get('MarkReferencePodcastConsumed')(
+        request({
+            params: { id: reference.id },
+            body: { method: 'played' }
+        }),
+        console
+    );
+    assert.equal(consumedAgain.status, 200);
+    assert.equal(parseJson(consumedAgain).alreadyConsumed, true);
+    assert.equal(
+        parseJson(consumedAgain).podcast.consumedAt,
+        consumedPayload.podcast.consumedAt
+    );
 
     console.log('Podcast function workflow test passed');
 }

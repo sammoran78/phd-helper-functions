@@ -257,6 +257,46 @@ app.http('GetReferencePodcastAudio', {
     }
 });
 
+app.http('MarkReferencePodcastConsumed', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'references/{id}/podcast/consumed',
+    handler: async (request, context) => {
+        if (!verifyDashboardRequest(request)) return unauthorized();
+        try {
+            const reference = await requireReference(request.params.id);
+            if (!reference) return json(404, { error: 'Reference not found' });
+            if (reference.podcast?.status !== 'complete' || !reference.podcast?.blobName) {
+                return json(409, { error: 'Podcast audio is not available' });
+            }
+
+            if (reference.podcast.consumedAt) {
+                return json(200, {
+                    success: true,
+                    podcast: podcastPayload(reference),
+                    alreadyConsumed: true
+                });
+            }
+
+            const body = await request.json().catch(() => ({}));
+            const method = body?.method === 'downloaded' ? 'downloaded' : 'played';
+            const consumedAt = nowIso();
+            const updatedReference = await updatePodcastReference(reference, {
+                consumedAt,
+                consumedMethod: method
+            });
+            return json(200, {
+                success: true,
+                podcast: podcastPayload(updatedReference),
+                alreadyConsumed: false
+            });
+        } catch (error) {
+            context.error('Mark Reference Podcast Consumed Error:', error);
+            return json(500, { error: 'Failed to update podcast playback state', details: error.message });
+        }
+    }
+});
+
 app.http('ClaimPodcastJob', {
     methods: ['POST'],
     authLevel: 'anonymous',
@@ -473,7 +513,9 @@ app.http('UploadPodcastJobAudio', {
                 fileName,
                 contentType,
                 sizeBytes: buffer.length,
-                completedAt
+                completedAt,
+                consumedAt: null,
+                consumedMethod: null
             });
             const completedJob = {
                 ...job,
