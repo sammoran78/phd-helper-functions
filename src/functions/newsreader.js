@@ -1,5 +1,9 @@
 const { app } = require('@azure/functions');
 const { queryItems, getItem, upsertItem } = require('../../shared/cosmosClient');
+const {
+    getResearchSearchPrompt,
+    saveResearchSearchPrompt
+} = require('../../shared/researchSearchPrompt');
 const crypto = require('crypto');
 
 // Shortlist stored in CosmosDB analytics container
@@ -7,8 +11,16 @@ const SHORTLIST_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analyti
 const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
 const SHORTLIST_ID = 'shortlist';
 const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY;
+const ANALYTICS_SCOPE = 'all_saved_references';
 
 const normalizeValue = (value) => (value || '').toString().trim().toLowerCase();
+const escapeRegExp = (value = '') => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const containsSearchTerm = (text = '', term = '') => {
+    const words = term.toString().trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return false;
+    const pattern = words.map(escapeRegExp).join('\\s+');
+    return new RegExp(`(^|\\W)${pattern}(?=$|\\W)`, 'i').test(text);
+};
 
 const normalizeDoi = (value) => {
     const s = normalizeValue(value);
@@ -23,7 +35,10 @@ const STOPWORDS = new Set([
     'about', 'above', 'after', 'again', 'against', 'between', 'beyond', 'could', 'should', 'would',
     'these', 'those', 'their', 'there', 'where', 'which', 'while', 'with', 'without', 'using',
     'study', 'studies', 'paper', 'papers', 'research', 'analysis', 'review', 'approach', 'model',
-    'system', 'method', 'methods', 'results', 'effect', 'effects', 'based', 'towards', 'future'
+    'system', 'method', 'methods', 'results', 'effect', 'effects', 'based', 'towards', 'future',
+    'this', 'that', 'into', 'across', 'within', 'thesis', 'doctoral', 'current', 'framing',
+    'examines', 'explores', 'focuses', 'prioritise', 'prioritize', 'quality', 'relevant',
+    'internationally', 'empirical', 'theoretical', 'scholarship'
 ]);
 
 const tokenizeText = (text = '') => text
@@ -293,6 +308,59 @@ const handleDismissRequest = async (body, context) => {
     };
 };
 
+// GET /api/newsreader/search-prompt - Get the shared thesis framing for discovery and gaps
+app.http('GetResearchSearchPrompt', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'newsreader/search-prompt',
+    handler: async (request, context) => {
+        try {
+            const prompt = await getResearchSearchPrompt();
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(prompt)
+            };
+        } catch (error) {
+            context.error('Get Research Search Prompt Error:', error);
+            return {
+                status: 500,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Failed to load research search prompt', details: error.message })
+            };
+        }
+    }
+});
+
+// PUT /api/newsreader/search-prompt - Persist the shared thesis framing
+app.http('UpdateResearchSearchPrompt', {
+    methods: ['PUT'],
+    authLevel: 'anonymous',
+    route: 'newsreader/search-prompt',
+    handler: async (request, context) => {
+        try {
+            const body = await request.json();
+            const saved = await saveResearchSearchPrompt(body?.content ?? body?.prompt);
+            return {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(saved)
+            };
+        } catch (error) {
+            const status = error?.status === 400 ? 400 : 500;
+            if (status === 500) context.error('Update Research Search Prompt Error:', error);
+            return {
+                status,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    error: status === 400 ? error.message : 'Failed to update research search prompt',
+                    ...(status === 500 ? { details: error.message } : {})
+                })
+            };
+        }
+    }
+});
+
 // GET /api/newsreader/shortlist - Get shortlisted articles
 app.http('GetShortlist', {
     methods: ['GET'],
@@ -548,7 +616,17 @@ app.http('GetNewsreaderArticles', {
                     : []
             );
 
-            const REQUIRED_QUERY_ANCHOR = 'creative labor creative industries arts media communication';
+            const researchPromptDocument = await getResearchSearchPrompt();
+            const researchPrompt = researchPromptDocument.content;
+            const researchPromptTokens = Array.from(new Set(tokenizeText(researchPrompt))).slice(0, 32);
+            const researchPromptTokenSet = new Set(researchPromptTokens);
+            const researchPromptQueries = researchPrompt
+                .split(/(?<=[.!?])\s+/)
+                .map(sentence => Array.from(new Set(tokenizeText(sentence))).slice(0, 16).join(' '))
+                .filter(query => query.split(' ').length >= 3)
+                .slice(0, 2)
+                .map(query => ({ query, category: 'Thesis Focus' }));
+            const REQUIRED_QUERY_ANCHOR = researchPromptTokens.slice(0, 12).join(' ') || 'creative labor creative industries arts media communication';
             const anchorQuery = (query = '') => `${query} ${REQUIRED_QUERY_ANCHOR}`.replace(/\s+/g, ' ').trim();
 
             const RQ_SEARCH_QUERIES = [
@@ -584,11 +662,13 @@ app.http('GetNewsreaderArticles', {
             let analyticsDomains = [];
             try {
                 const querySpec = {
-                    query: 'SELECT * FROM c WHERE c.type = "corpus_analysis" ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1'
+                    query: 'SELECT * FROM c WHERE c.type = "corpus_analysis" AND c.scope = @scope ORDER BY c.dateGenerated DESC OFFSET 0 LIMIT 1',
+                    parameters: [{ name: '@scope', value: ANALYTICS_SCOPE }]
                 };
                 const analyticsResults = await queryItems(SHORTLIST_CONTAINER, querySpec);
                 const latest = analyticsResults[0];
-                if (latest) {
+                const analyticsMatchesPrompt = latest?.researchPromptUpdatedAt === researchPromptDocument.updatedAt;
+                if (latest && analyticsMatchesPrompt) {
                     analyticsGaps = Array.isArray(latest.gaps) ? latest.gaps : [];
                     analyticsSubjects = Array.isArray(latest.subjects)
                         ? latest.subjects.map(s => s?.name).filter(Boolean)
@@ -606,6 +686,8 @@ app.http('GetNewsreaderArticles', {
                     analyticsDomains = Array.from(domainNames);
 
                     context.log(`[Newsreader] Loaded analytics: ${analyticsGaps.length} gaps, ${analyticsSubjects.length} subjects`);
+                } else if (latest) {
+                    context.log('[Newsreader] Saved gap analysis predates the current research search prompt; using prompt-led discovery until Analytics is refreshed.');
                 }
             } catch (e) {
                 context.warn('[Newsreader] Failed to load analytics gaps:', e.message);
@@ -653,8 +735,9 @@ app.http('GetNewsreaderArticles', {
                     category: `Domain: ${domain}`
                 }));
 
-            // Combine queries with explicit RQ-first prioritization and dedupe
+            // Prioritize the editable thesis framing, then RQs, current gaps and corpus topics.
             const searchQueries = [
+                ...researchPromptQueries,
                 ...RQ_SEARCH_QUERIES.map(q => ({ ...q, query: anchorQuery(q.query) })),
                 ...gapQueries,
                 ...subjectQueries,
@@ -672,10 +755,10 @@ app.http('GetNewsreaderArticles', {
 
                 let score = 0;
 
-                const aiTitleHit = AI_RELEVANCE_KEYWORDS.some(kw => titleText.includes(kw.toLowerCase()));
-                const aiAbstractHit = AI_RELEVANCE_KEYWORDS.some(kw => abstractText.includes(kw.toLowerCase()));
-                const scopeTitleHit = THESIS_SCOPE_KEYWORDS.some(kw => titleText.includes(kw.toLowerCase()));
-                const scopeAbstractHit = THESIS_SCOPE_KEYWORDS.some(kw => abstractText.includes(kw.toLowerCase()));
+                const aiTitleHit = AI_RELEVANCE_KEYWORDS.some(kw => containsSearchTerm(titleText, kw));
+                const aiAbstractHit = AI_RELEVANCE_KEYWORDS.some(kw => containsSearchTerm(abstractText, kw));
+                const scopeTitleHit = THESIS_SCOPE_KEYWORDS.some(kw => containsSearchTerm(titleText, kw));
+                const scopeAbstractHit = THESIS_SCOPE_KEYWORDS.some(kw => containsSearchTerm(abstractText, kw));
 
                 if (aiTitleHit) score += 4;
                 else if (aiAbstractHit) score += 2;
@@ -692,22 +775,36 @@ app.http('GetNewsreaderArticles', {
                 ];
 
                 focusGroups.forEach(group => {
-                    const titleHit = group.some(term => titleText.includes(term));
-                    const fullHit = group.some(term => fullText.includes(term));
+                    const titleHit = group.some(term => containsSearchTerm(titleText, term));
+                    const fullHit = group.some(term => containsSearchTerm(fullText, term));
                     if (titleHit) score += 3;
                     else if (fullHit) score += 1;
                 });
 
+                const titlePromptMatches = new Set(tokenizeText(titleText).filter(token => researchPromptTokenSet.has(token))).size;
+                const abstractPromptMatches = new Set(tokenizeText(abstractText).filter(token => researchPromptTokenSet.has(token))).size;
+                score += Math.min(10, titlePromptMatches * 2);
+                score += Math.min(5, abstractPromptMatches);
+
                 return score;
+            };
+
+            const scoreArticleImpact = (citationCount, source, abstract) => {
+                const citations = Math.max(0, Number(citationCount) || 0);
+                let score = Math.min(6, Math.log10(citations + 1) * 2.5);
+                if ((source || '').trim()) score += 0.5;
+                if ((abstract || '').trim().length >= 200) score += 0.5;
+                return Number(score.toFixed(2));
             };
             
             const isRelevantArticle = (title, abstract) => {
                 const text = `${title || ''} ${abstract || ''}`.toLowerCase();
-                const hasAiKeyword = AI_RELEVANCE_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
-                if (!hasAiKeyword) return false;
+                const promptMatchCount = new Set(tokenizeText(text).filter(token => researchPromptTokenSet.has(token))).size;
+                const hasAiKeyword = AI_RELEVANCE_KEYWORDS.some(kw => containsSearchTerm(text, kw));
+                if (!hasAiKeyword && promptMatchCount < 2) return false;
 
-                const hasScopeKeyword = THESIS_SCOPE_KEYWORDS.some(kw => text.includes(kw.toLowerCase()));
-                if (!hasScopeKeyword) return false;
+                const hasScopeKeyword = THESIS_SCOPE_KEYWORDS.some(kw => containsSearchTerm(text, kw));
+                if (!hasScopeKeyword && promptMatchCount < 3) return false;
 
                 if (dismissedNegativeTokenSet && dismissedNegativeTokenSet.size > 0) {
                     const tokens = tokenizeText(`${title || ''} ${abstract || ''}`);
@@ -830,6 +927,7 @@ app.http('GetNewsreaderArticles', {
                         }
                         
                         const source = item['container-title']?.[0] || item.publisher || '';
+                        const citationCount = Number(item['is-referenced-by-count'] || 0);
                         const typeMap = { 'journal-article': 'Journal Article', 'book-chapter': 'Book Section', 'proceedings-article': 'Conference Paper' };
                         
                         allArticles.push({
@@ -845,6 +943,8 @@ app.http('GetNewsreaderArticles', {
                             isNew,
                             publishedDate: pubDate?.toISOString(),
                             relevanceScore: scoreArticleRelevance(title, abstract),
+                            citationCount,
+                            impactScore: scoreArticleImpact(citationCount, source, abstract),
                             apiSource: 'CrossRef',
                             doiKey: normalizeDoi(doi),
                             titleKey: normalizeValue(title)
@@ -856,7 +956,7 @@ app.http('GetNewsreaderArticles', {
             // Search Semantic Scholar
             for (const sq of searchQueries.slice(0, 4)) {
                 try {
-                    const ssUrl = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(sq.query)}&limit=8&fields=title,authors,year,abstract,url,venue,publicationDate,externalIds`;
+                    const ssUrl = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(sq.query)}&limit=8&fields=title,authors,year,abstract,url,venue,publicationDate,externalIds,citationCount,influentialCitationCount`;
                     const response = await fetch(ssUrl, { 
                         headers: { 'User-Agent': 'PhD-Helper/1.0' }
                     });
@@ -877,6 +977,7 @@ app.http('GetNewsreaderArticles', {
                         const isNew = pubDate && pubDate >= ninetyDaysAgo;
                         
                         const authors = paper.authors?.map(a => a.name).join('; ') || 'Unknown Author';
+                        const citationCount = Number(paper.citationCount || 0);
                         
                         allArticles.push({
                             doi: doi || paper.paperId,
@@ -891,6 +992,9 @@ app.http('GetNewsreaderArticles', {
                             isNew,
                             publishedDate: pubDate?.toISOString(),
                             relevanceScore: scoreArticleRelevance(title, paperAbstract),
+                            citationCount,
+                            influentialCitationCount: Number(paper.influentialCitationCount || 0),
+                            impactScore: scoreArticleImpact(citationCount, paper.venue, paperAbstract),
                             apiSource: 'Semantic Scholar',
                             doiKey: normalizeDoi(doi || paper.paperId),
                             titleKey: normalizeValue(title)
@@ -921,6 +1025,7 @@ app.http('GetNewsreaderArticles', {
                             if (!year || year < minYear || year > now.getFullYear() + 1) continue;
 
                             const googleAuthors = normalizeAuthors(item.publication_info?.authors || item.publication_info?.summary || '');
+                            const citationCount = Number(item.inline_links?.cited_by?.total || 0);
 
                             allArticles.push({
                                 doi: doi || link,
@@ -935,6 +1040,8 @@ app.http('GetNewsreaderArticles', {
                                 isNew: year >= now.getFullYear() - 1,
                                 publishedDate: null,
                                 relevanceScore: scoreArticleRelevance(title, abstract),
+                                citationCount,
+                                impactScore: scoreArticleImpact(citationCount, 'Google Scholar', abstract),
                                 apiSource: 'Google Scholar (SerpAPI)',
                                 doiKey: normalizeDoi(doi || link),
                                 titleKey: normalizeValue(title)
@@ -981,6 +1088,8 @@ app.http('GetNewsreaderArticles', {
                             isNew,
                             publishedDate: publishedDate?.toISOString(),
                             relevanceScore: scoreArticleRelevance(title, abstract),
+                            citationCount: 0,
+                            impactScore: scoreArticleImpact(0, 'arXiv', abstract),
                             apiSource: 'arXiv',
                             doiKey: normalizeDoi(entry.doi || entry.id),
                             titleKey: normalizeValue(title)
@@ -991,8 +1100,9 @@ app.http('GetNewsreaderArticles', {
             
             // Sort by relevance first, then recency
             let results = allArticles.sort((a, b) => {
-                const relevanceDiff = (b.relevanceScore || 0) - (a.relevanceScore || 0);
-                if (relevanceDiff !== 0) return relevanceDiff;
+                const rankingDiff = ((b.relevanceScore || 0) + (b.impactScore || 0))
+                    - ((a.relevanceScore || 0) + (a.impactScore || 0));
+                if (rankingDiff !== 0) return rankingDiff;
                 const dateA = a.publishedDate ? new Date(a.publishedDate) : new Date(a.year, 0, 1);
                 const dateB = b.publishedDate ? new Date(b.publishedDate) : new Date(b.year, 0, 1);
                 return dateB - dateA;

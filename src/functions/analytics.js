@@ -5,6 +5,7 @@
 
 const { app } = require('@azure/functions');
 const { getItem, upsertItem, queryItems } = require('../../shared/cosmosClient');
+const { getResearchSearchPrompt } = require('../../shared/researchSearchPrompt');
 
 const CONTAINER_NAME = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analytics';
 const REFERENCES_CONTAINER = process.env.COSMOSDB_CONTAINER_REFERENCES || 'references';
@@ -12,10 +13,25 @@ const WRITING_ANALYTICS_LATEST_ID = 'writing_analytics_latest';
 const LANDSCAPE_DOC_ID = 'analytics_landscape';
 const LANDSCAPE_TTL_MS = 24 * 60 * 60 * 1000;
 const COFFEE_COUNTER_DOC_ID = 'coffee_counter';
-const LANDSCAPE_SCOPE = 'kb_status_3_only';
-const KB_REFERENCE_FILTER_CLAUSE = 'c.ref_knowledge_status = 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
-const LANDSCAPE_REFERENCE_QUERY = `SELECT c.id, c.title, c.authors, c.year, c.source, c.tags, c.keywords, c.discipline, c.frameworks, c.concepts, c.summary, c.design, c.analysis, c.apa7, c.journal, c.publisher, c.abstract FROM c WHERE ${KB_REFERENCE_FILTER_CLAUSE}`;
-const ANALYTICS_REFERENCE_QUERY = `SELECT * FROM c WHERE ${KB_REFERENCE_FILTER_CLAUSE}`;
+const LANDSCAPE_SCOPE = 'all_saved_references';
+const SAVED_REFERENCE_FILTER_CLAUSE = '(NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
+const LANDSCAPE_REFERENCE_QUERY = `SELECT c.id, c.title, c.authors, c.year, c.source, c.tags, c.keywords, c.discipline, c.frameworks, c.concepts, c.summary, c.design, c.analysis, c.apa7, c.journal, c.publisher, c.abstract, c.ref_knowledge_status FROM c WHERE ${SAVED_REFERENCE_FILTER_CLAUSE}`;
+const ANALYTICS_REFERENCE_QUERY = `SELECT * FROM c WHERE ${SAVED_REFERENCE_FILTER_CLAUSE}`;
+
+const COVERAGE_STOPWORDS = new Set([
+    'about', 'across', 'after', 'against', 'also', 'based', 'between', 'current', 'doctoral',
+    'examines', 'focuses', 'future', 'internationally', 'people', 'prioritise', 'prioritize',
+    'quality', 'relevant', 'research', 'scholarship', 'studies', 'study', 'their', 'theoretical',
+    'these', 'thesis', 'this', 'those', 'through', 'towards', 'using', 'which', 'while', 'within',
+    'with', 'workers'
+]);
+
+const tokenizeCoverageText = (text = '') => text
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length > 3 && !COVERAGE_STOPWORDS.has(token));
 
 const isLandscapeStale = (dateGenerated) => {
     if (!dateGenerated) return true;
@@ -271,8 +287,13 @@ app.http('AnalyzeCorpus', {
     route: 'analytics/analyze',
     handler: async (request, context) => {
         try {
-            // Analyze only references that are in the RAG knowledge base (status 3)
+            // Analyze every saved, non-dismissed reference: reading list plus all
+            // bibliography/Knowledge Base states.
             const references = await queryItems(REFERENCES_CONTAINER, { query: ANALYTICS_REFERENCE_QUERY });
+            const researchPromptDocument = await getResearchSearchPrompt();
+            const researchPrompt = researchPromptDocument.content;
+            const bibliographyReferenceCount = references.filter(ref => Number(ref?.ref_knowledge_status || 0) >= 3).length;
+            const readingListReferenceCount = references.length - bibliographyReferenceCount;
             
             context.log(`Analyzing ${references.length} references`);
             
@@ -347,24 +368,27 @@ app.http('AnalyzeCorpus', {
                     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
                     
                     // Prepare reference summaries for AI
-                    const refSummaries = references.slice(0, 100).map(r => 
-                        `- ${r.title} (${r.year}): ${r.design || 'No method'} | ${r.discipline || 'No discipline'} | ${r.keywords || ''}`
+                    const refSummaries = references.map(r =>
+                        `- [${Number(r?.ref_knowledge_status || 0) >= 3 ? 'Knowledge Base/bibliography' : 'Reading list'}] ${r.title} (${r.year || 'n.d.'}): ${r.design || 'No method'} | ${r.discipline || 'No discipline'} | ${r.keywords || r.tags || ''} | ${(r.summary || r.abstract || '').toString().replace(/\s+/g, ' ').slice(0, 240)}`
                     ).join('\n');
 
                     const prompt = `
-                        Analyze this academic bibliography (${references.length} references) for a PhD thesis.
+                        Analyze the complete saved literature collection (${references.length} references: ${bibliographyReferenceCount} in the Knowledge Base/bibliography and ${readingListReferenceCount} in the reading list) for a PhD thesis.
+
+                        Current Research and Thesis Framing (authoritative):
+                        ${researchPrompt}
                         
                         Data Summary:
                         - Disciplines: ${topDisciplines.join(', ')}
                         - Methods: ${methods.map(m => m.name).join(', ')}
                         - Key Topics: ${subjects.slice(0, 10).map(s => s.name).join(', ')}
                         
-                        Bibliography Sample:
+                        Complete Saved Literature:
                         ${refSummaries}
                         
                         Task:
-                        1. Summarize the research landscape and coverage.
-                        2. Identify 3-5 critical gaps in methodology, theory, or empirical settings.
+                        1. Summarize the research landscape and coverage relative to the current thesis framing.
+                        2. Identify 3-5 critical gaps in methodology, theory, empirical settings, or thesis-framing coverage. Compare against the complete saved collection, including both reading-list items and the Knowledge Base/bibliography.
                         3. Suggest specific types of sources needed to fill these gaps.
                         
                         Output JSON format:
@@ -395,7 +419,8 @@ app.http('AnalyzeCorpus', {
             if (!insights) {
                 insights = `Your corpus contains ${references.length} references spanning ${Object.keys(yearCounts).length} years. ` +
                     `Primary disciplines: ${topDisciplines.join(', ') || 'Not categorized'}. ` +
-                    `Most common types: ${Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).slice(0,3).map(([t]) => t).join(', ') || 'Various'}.`;
+                    `Most common types: ${Object.entries(typeCounts).sort((a,b) => b[1]-a[1]).slice(0,3).map(([t]) => t).join(', ') || 'Various'}. ` +
+                    'Coverage was assessed against the saved research framing.';
                 
                 // Methodology Gaps
                 const expectedMethods = ['qualitative', 'quantitative', 'mixed methods'];
@@ -423,6 +448,35 @@ app.http('AnalyzeCorpus', {
                         searchQueries: [`latest research ${subjects[0]?.name || ''} ${currentYear}`, `new developments ${topDisciplines[0] || ''}`]
                     });
                 }
+
+                // Thesis-framing coverage gap: compare the editable framing with
+                // metadata and summaries from every saved reference.
+                const corpusTokenCounts = new Map();
+                references.forEach(ref => {
+                    const text = [
+                        ref.title, ref.keywords, ref.tags, ref.discipline, ref.frameworks,
+                        ref.concepts, ref.summary, ref.abstract, ref.design, ref.analysis
+                    ].filter(Boolean).join(' ');
+                    new Set(tokenizeCoverageText(text)).forEach(token => {
+                        corpusTokenCounts.set(token, (corpusTokenCounts.get(token) || 0) + 1);
+                    });
+                });
+                const undercoveredPromptTerms = Array.from(new Set(tokenizeCoverageText(researchPrompt)))
+                    .filter(token => (corpusTokenCounts.get(token) || 0) < 2)
+                    .slice(0, 8);
+
+                if (undercoveredPromptTerms.length >= 3) {
+                    gaps.push({
+                        name: 'Undercovered current thesis framing',
+                        description: `The saved collection has limited coverage of several concepts now present in the research framing: ${undercoveredPromptTerms.join(', ')}.`,
+                        severity: Math.min(0.9, 0.45 + undercoveredPromptTerms.length * 0.05),
+                        connectedDomains: topDisciplines,
+                        searchQueries: [
+                            undercoveredPromptTerms.slice(0, 4).join(' '),
+                            undercoveredPromptTerms.slice(4, 8).join(' ')
+                        ].filter(Boolean)
+                    });
+                }
             }
             
             const analysis = {
@@ -433,6 +487,10 @@ app.http('AnalyzeCorpus', {
                 timestamp: new Date().toISOString(),
                 referenceCount: references.length,
                 totalReferences: references.length,
+                bibliographyReferenceCount,
+                readingListReferenceCount,
+                researchPrompt,
+                researchPromptUpdatedAt: researchPromptDocument.updatedAt || null,
                 insights,
                 methods,
                 subjects,
