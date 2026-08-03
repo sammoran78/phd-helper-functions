@@ -284,6 +284,10 @@ function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, quer
         instructions: buildRagInstructions(systemPrompt),
         input: buildRagInput(query, historyText),
         max_output_tokens: maxOutputTokens,
+        // File-search result attributes and snippets carry the durable
+        // referenceId/pageNumber metadata used to hydrate author-year citations.
+        // Keep this on the base payload so every retry path preserves it.
+        include: ['file_search_call.results'],
         tools: [
             {
                 type: 'file_search',
@@ -371,6 +375,23 @@ function parseDocMetadataFromText(text) {
     return meta;
 }
 
+function getCitationMetadataValue(metadata = {}, ...names) {
+    if (!metadata || typeof metadata !== 'object') return '';
+
+    const normalized = new Map(
+        Object.entries(metadata).map(([key, value]) => [
+            key.toLowerCase().replace(/[^a-z0-9]/g, ''),
+            value
+        ])
+    );
+
+    for (const name of names) {
+        const value = normalized.get(name.toLowerCase().replace(/[^a-z0-9]/g, ''));
+        if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return '';
+}
+
 function getFileSearchResultAttributes(result = {}) {
     return result.attributes
         || result.file_attributes
@@ -427,13 +448,13 @@ function buildCitationRecordFromFileSearchResult(fileId, result = {}, options = 
     const parsed = parseReferencePageFromVectorFileName(filename);
 
     return buildCitationRecord(fileId, {
-        referenceId: attrs.referenceId || attrs.reference_id || docMeta.referenceId || parsed?.referenceId,
-        pageNumber: attrs.pageNumber || attrs.page_number || docMeta.pageNumber || parsed?.pageNumber,
-        title: attrs.title || docMeta.title || filename,
-        authors: attrs.authors || attrs.author || docMeta.authors,
-        year: attrs.year || docMeta.year,
-        source: attrs.source || docMeta.source,
-        pageUrl: attrs.blobUrl || attrs.blob_url || attrs.pageUrl || attrs.page_url,
+        referenceId: getCitationMetadataValue(attrs, 'referenceId') || getCitationMetadataValue(docMeta, 'referenceId') || parsed?.referenceId,
+        pageNumber: getCitationMetadataValue(attrs, 'pageNumber') || getCitationMetadataValue(docMeta, 'pageNumber') || parsed?.pageNumber,
+        title: getCitationMetadataValue(attrs, 'title') || getCitationMetadataValue(docMeta, 'title') || filename,
+        authors: getCitationMetadataValue(attrs, 'authors', 'author') || getCitationMetadataValue(docMeta, 'authors', 'author'),
+        year: getCitationMetadataValue(attrs, 'year') || getCitationMetadataValue(docMeta, 'year'),
+        source: getCitationMetadataValue(attrs, 'source') || getCitationMetadataValue(docMeta, 'source'),
+        pageUrl: getCitationMetadataValue(attrs, 'blobUrl', 'pageUrl'),
         filename
     }, {
         resolutionStatus: options.resolutionStatus || 'resolved_from_file_search_result'
@@ -450,8 +471,8 @@ async function resolveCitationFromFileSearchResult(fileId, result = {}, options 
     const docMeta = parseDocMetadataFromText(result.text || result.content || result.snippet || '');
     const filename = getFileSearchResultFilename(result);
     const parsedFromFilename = parseReferencePageFromVectorFileName(filename);
-    const referenceId = attrs.referenceId || attrs.reference_id || docMeta.referenceId || parsedFromFilename?.referenceId;
-    const rawPageNumber = attrs.pageNumber || attrs.page_number || docMeta.pageNumber || parsedFromFilename?.pageNumber;
+    const referenceId = getCitationMetadataValue(attrs, 'referenceId') || getCitationMetadataValue(docMeta, 'referenceId') || parsedFromFilename?.referenceId;
+    const rawPageNumber = getCitationMetadataValue(attrs, 'pageNumber') || getCitationMetadataValue(docMeta, 'pageNumber') || parsedFromFilename?.pageNumber;
     const pageNumber = Number.parseInt(rawPageNumber, 10);
 
     if (referenceId && Number.isFinite(pageNumber)) {
@@ -661,6 +682,31 @@ async function resolveCitationFromOpenAiFileRecord(fileId, options = {}) {
     }
 }
 
+async function resolveCitationFromVectorStoreFile(fileId, options = {}) {
+    const openai = options?.openai;
+    const vectorStoreId = options?.vectorStoreId || process.env.OPENAI_VECTOR_STORE;
+    const context = options?.context;
+    if (!openai?.vectorStores?.files || !vectorStoreId || !fileId) return null;
+
+    try {
+        const [vectorFile, fileRecord] = await Promise.all([
+            openai.vectorStores.files.retrieve(vectorStoreId, fileId),
+            openai.files.retrieve(fileId).catch(() => null)
+        ]);
+        const result = {
+            file_id: fileId,
+            filename: fileRecord?.filename || fileRecord?.name || '',
+            attributes: vectorFile?.attributes || {}
+        };
+        return await resolveCitationFromFileSearchResult(fileId, result, {
+            resolutionStatus: 'resolved_from_vector_store_metadata'
+        });
+    } catch (error) {
+        context?.warn?.(`[KB RAG] Vector store metadata lookup failed for ${fileId}:`, error?.message || String(error));
+        return null;
+    }
+}
+
 function buildApa7Fallback(reference) {
     const authors = reference?.authors || reference?.author || 'Unknown Author';
     const year = reference?.year || 'n.d.';
@@ -710,13 +756,18 @@ async function lookupCitationByFileId(fileId, options = {}) {
     }
 
     const pages = await queryItems(CONTAINER_PAGES, {
-        query: 'SELECT TOP 1 * FROM c WHERE IS_DEFINED(c.openaiVector) AND c.openaiVector.fileId = @fileId',
+        query: `SELECT TOP 1 * FROM c
+            WHERE IS_DEFINED(c.openaiVector)
+            AND (c.openaiVector.fileId = @fileId OR c.openaiVector.vectorStoreFileId = @fileId)`,
         parameters: [{ name: '@fileId', value: fileId }]
     });
     const page = Array.isArray(pages) && pages.length > 0 ? pages[0] : null;
     if (!page) {
+        const vectorStoreResolved = await resolveCitationFromVectorStoreFile(fileId, options);
+        if (vectorStoreResolved?.resolved) return vectorStoreResolved;
         const openAiResolved = await resolveCitationFromOpenAiFileRecord(fileId, options);
         if (openAiResolved) return openAiResolved;
+        if (vectorStoreResolved) return vectorStoreResolved;
         if (fileSearchResult) return await resolveCitationFromFileSearchResult(fileId, fileSearchResult, { resolutionStatus: 'file_search_result_metadata_incomplete' });
         return buildCitationRecord(fileId, {}, { resolutionStatus: 'page_not_found' });
     }
@@ -870,23 +921,15 @@ app.http('KBRagChat', {
             try {
                 response = await openai.responses.create({
                     ...basePayload,
-                    include: ['file_search_call.results'],
                     ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
                 });
             } catch (err) {
                 const msg = (err && err.message) ? err.message : String(err);
                 if (useReasoning && reasoningEffort) {
                     context.warn('[KB RAG Chat] reasoning_effort rejected; retrying without it. Error:', msg);
-                    try {
-                        response = await openai.responses.create({
-                            ...basePayload,
-                            include: ['file_search_call.results']
-                        });
-                    } catch (retryErr) {
-                        response = await openai.responses.create(basePayload);
-                    }
-                } else {
                     response = await openai.responses.create(basePayload);
+                } else {
+                    throw err;
                 }
             }
 
@@ -1036,7 +1079,6 @@ app.http('KBRagChatStream', {
                             try {
                                 openaiStream = await openai.responses.create({
                                     ...basePayload,
-                                    include: ['file_search_call.results'],
                                     stream: true,
                                     ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
                                 });
@@ -1143,3 +1185,13 @@ app.http('KBRagChatStream', {
         }
     }
 });
+
+module.exports = {
+    __test: {
+        buildRagPayload,
+        buildCitationRecordFromFileSearchResult,
+        getCitationMetadataValue,
+        parseDocMetadataFromText,
+        resolveCitationFromVectorStoreFile
+    }
+};

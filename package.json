@@ -5,7 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "func start",
-    "test": "node --check src/functions/newsreader.js && node --check src/functions/analytics.js && node --check shared/researchSearchPrompt.js && node --check src/functions/podcasts.js && node --check shared/requestAuth.js && node --check worker/podcast-worker.js && node scripts/test-podcasts.js"
+    "test": "node --check src/functions/newsreader.js && node --check src/functions/analytics.js && node --check src/functions/ai.js && node --check shared/researchSearchPrompt.js && node --check src/functions/podcasts.js && node --check shared/requestAuth.js && node --check worker/podcast-worker.js && node scripts/test-ai-citations.js && node scripts/test-podcasts.js"
   },
   "dependencies": {
     "@azure/cosmos": "^4.0.0",
