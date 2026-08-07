@@ -37,6 +37,12 @@ audio is uploaded, playback and download are served from Azure.
    .\Start-PodcastWorker.ps1
    ```
 
+Each startup checks PyPI for a newer `notebooklm-mcp-cli` release and upgrades
+the package inside the worker's `.venv` before checking authentication or
+launching the worker. Update failures are reported as warnings and do not stop
+the installed version from starting. Use `-SkipNotebookLMUpdate` only when an
+update check needs to be bypassed temporarily.
+
 The worker reads `.env` without a third-party package, so it can also be
 configured entirely through Windows environment variables.
 
@@ -59,6 +65,8 @@ queued jobs.
 - `NOTEBOOKLM_MCP_ARGS`: JSON array of optional MCP command arguments.
 - `PODCAST_WORKER_POLL_MS`: delay between claim attempts.
 - `PODCAST_GENERATION_TIMEOUT_MS`: maximum wait for NotebookLM audio.
+- `PODCAST_STATUS_RETRY_MS`: delay after a transient NotebookLM studio-status failure.
+- `PODCAST_STATUS_MAX_CONSECUTIVE_FAILURES`: status failures tolerated before the attempt is marked failed.
 - `PODCAST_WORKER_ONCE`: process at most one job and exit.
 - `PODCAST_KEEP_NOTEBOOKS`: retain temporary notebooks after successful upload.
 

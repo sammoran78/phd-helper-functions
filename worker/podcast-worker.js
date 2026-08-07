@@ -12,6 +12,11 @@ const API_BASE = (
 const WORKER_TOKEN = process.env.PODCAST_WORKER_TOKEN || '';
 const POLL_MS = Number(process.env.PODCAST_WORKER_POLL_MS || 10000);
 const GENERATION_TIMEOUT_MS = Number(process.env.PODCAST_GENERATION_TIMEOUT_MS || 30 * 60 * 1000);
+const STATUS_RETRY_MS = Number(process.env.PODCAST_STATUS_RETRY_MS || 12000);
+const STATUS_MAX_CONSECUTIVE_FAILURES = Math.max(
+    1,
+    Number(process.env.PODCAST_STATUS_MAX_CONSECUTIVE_FAILURES || 5)
+);
 const RUN_ONCE = /^true$/i.test(process.env.PODCAST_WORKER_ONCE || '');
 const KEEP_NOTEBOOKS = /^true$/i.test(process.env.PODCAST_KEEP_NOTEBOOKS || '');
 const LOCAL_MCP_COMMAND = path.join(__dirname, '.venv', 'Scripts', 'notebooklm-mcp.exe');
@@ -170,12 +175,41 @@ async function callTool(client, name, args) {
 
 async function waitForAudio(client, jobId, notebookId, artifactId) {
     const startedAt = Date.now();
+    let consecutiveStatusFailures = 0;
     while (Date.now() - startedAt < GENERATION_TIMEOUT_MS) {
-        const payload = await callTool(client, 'studio_status', {
-            notebook_id: notebookId,
-            artifact_id: artifactId,
-            include_details: false
-        });
+        let payload;
+        try {
+            payload = await callTool(client, 'studio_status', {
+                notebook_id: notebookId,
+                artifact_id: artifactId,
+                include_details: false
+            });
+            consecutiveStatusFailures = 0;
+        } catch (error) {
+            consecutiveStatusFailures += 1;
+            if (consecutiveStatusFailures >= STATUS_MAX_CONSECUTIVE_FAILURES) {
+                throw new Error(
+                    `Could not retrieve studio status after ${consecutiveStatusFailures} attempts: ${error.message}`
+                );
+            }
+            console.warn(
+                `[PodcastWorker] Studio status unavailable for ${jobId}; `
+                + `retrying (${consecutiveStatusFailures}/${STATUS_MAX_CONSECUTIVE_FAILURES})`
+            );
+            try {
+                await reportProgress(jobId, {
+                    status: 'generating',
+                    progress: 45,
+                    stage: `NotebookLM status temporarily unavailable; retrying (${consecutiveStatusFailures}/${STATUS_MAX_CONSECUTIVE_FAILURES})`,
+                    notebookId,
+                    artifactId
+                });
+            } catch (progressError) {
+                console.warn(`[PodcastWorker] Could not report status retry: ${progressError.message}`);
+            }
+            await sleep(STATUS_RETRY_MS);
+            continue;
+        }
         const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
         const artifact = artifacts.find(item =>
             item?.artifact_id === artifactId || item?.id === artifactId
@@ -225,6 +259,18 @@ async function processJob(claim) {
             stage: 'Connecting to NotebookLM'
         });
         client = await connectMcp();
+
+        if (job.cleanupNotebookId && job.cleanupNotebookId !== notebookId) {
+            try {
+                await callTool(client, 'notebook_delete', {
+                    notebook_id: job.cleanupNotebookId,
+                    confirm: true
+                });
+                console.log(`[PodcastWorker] Removed superseded NotebookLM notebook ${job.cleanupNotebookId}`);
+            } catch (cleanupError) {
+                console.warn(`[PodcastWorker] Could not remove superseded notebook: ${cleanupError.message}`);
+            }
+        }
 
         if (notebookId && artifactId) {
             await reportProgress(job.id, {

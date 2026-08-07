@@ -229,6 +229,59 @@ async function run() {
         consumedPayload.podcast.consumedAt
     );
 
+    const resetReference = {
+        id: 'ref-2',
+        title: 'Paper With Unavailable Studio Status',
+        files: [{
+            name: 'paper-2.pdf',
+            blobName: 'papers/paper-2.pdf',
+            contentType: 'application/pdf'
+        }]
+    };
+    items.set(key('references', resetReference.id), structuredClone(resetReference));
+    blobs.set(key('uploads', 'papers/paper-2.pdf'), Buffer.from('%PDF-test-2'));
+
+    const resetCreated = await handlers.get('CreateReferencePodcast')(
+        request({ params: { id: resetReference.id } }),
+        console
+    );
+    const failedJobId = parseJson(resetCreated).jobId;
+    await handlers.get('ClaimPodcastJob')(request(), console);
+    await handlers.get('UpdatePodcastJobProgress')(
+        request({
+            params: { jobId: failedJobId },
+            body: {
+                status: 'error',
+                progress: 0,
+                stage: 'Podcast generation failed',
+                error: 'Could not retrieve studio status after 5 attempts',
+                notebookId: 'stale-notebook',
+                artifactId: 'stale-artifact'
+            }
+        }),
+        console
+    );
+
+    const resetRetry = await handlers.get('CreateReferencePodcast')(
+        request({
+            params: { id: resetReference.id },
+            body: { retry: true }
+        }),
+        console
+    );
+    const resetPayload = parseJson(resetRetry);
+    assert.equal(resetRetry.status, 202);
+    assert.equal(resetPayload.reset, true);
+    assert.notEqual(resetPayload.jobId, failedJobId);
+    const freshJob = items.get(key('jobs', resetPayload.jobId));
+    assert.equal(freshJob.resetFromJobId, failedJobId);
+    assert.equal(freshJob.cleanupNotebookId, 'stale-notebook');
+    assert.equal(freshJob.notebookId, undefined);
+    const refreshedReference = items.get(key('references', resetReference.id));
+    assert.equal(refreshedReference.podcast.jobId, resetPayload.jobId);
+    assert.equal(refreshedReference.podcast.notebookId, null);
+    assert.equal(items.get(key('jobs', failedJobId)).status, 'error');
+
     console.log('Podcast function workflow test passed');
 }
 

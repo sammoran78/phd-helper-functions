@@ -107,6 +107,11 @@ async function requireReference(referenceId) {
     return getItem(REFERENCES_CONTAINER, referenceId, referenceId);
 }
 
+function shouldStartFreshAttempt(job) {
+    const details = `${job?.stage || ''} ${job?.error || ''}`.toLowerCase();
+    return /studio status|artifact[^.]*\b(not found|missing|invalid|unavailable)\b|notebook[^.]*\b(not found|missing|invalid)\b/.test(details);
+}
+
 app.http('CreateReferencePodcast', {
     methods: ['POST'],
     authLevel: 'anonymous',
@@ -120,9 +125,11 @@ app.http('CreateReferencePodcast', {
             if (!pdf) return json(400, { error: 'This reference does not have an attached PDF' });
 
             let retry = false;
+            let reset = false;
             try {
                 const body = await request.json();
                 retry = body?.retry === true;
+                reset = body?.reset === true;
             } catch {}
 
             const existing = await loadPodcastJob(reference);
@@ -141,7 +148,10 @@ app.http('CreateReferencePodcast', {
                     podcast: podcastPayload(reference, existing)
                 });
             }
-            if (retry && existing?.status === 'error' && existing.notebookId && existing.artifactId) {
+            const startFresh = retry
+                && existing?.status === 'error'
+                && (reset || shouldStartFreshAttempt(existing));
+            if (retry && existing?.status === 'error' && existing.notebookId && existing.artifactId && !startFresh) {
                 const resumedAt = nowIso();
                 const resumedJob = {
                     ...existing,
@@ -182,6 +192,11 @@ app.http('CreateReferencePodcast', {
                 error: null,
                 ttl: JOB_TTL_SECONDS
             };
+            if (startFresh) {
+                job.resetFromJobId = existing.id;
+                job.cleanupNotebookId = existing.notebookId || null;
+                job.stage = 'Waiting for laptop worker to start a fresh attempt';
+            }
             await createItem(JOBS_CONTAINER, job);
             const updatedReference = await updatePodcastReference(reference, {
                 status: 'queued',
@@ -191,11 +206,15 @@ app.http('CreateReferencePodcast', {
                 error: null,
                 requestedAt: createdAt,
                 provider: 'notebooklm',
-                format: 'deep_dive'
+                format: 'deep_dive',
+                notebookId: startFresh ? null : reference.podcast?.notebookId,
+                sourceId: startFresh ? null : reference.podcast?.sourceId,
+                artifactId: startFresh ? null : reference.podcast?.artifactId
             });
             context.log(`Podcast job ${job.id} queued for reference ${reference.id}`);
             return json(202, {
                 success: true,
+                reset: startFresh,
                 jobId: job.id,
                 podcast: podcastPayload(updatedReference, job)
             });
