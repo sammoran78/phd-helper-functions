@@ -17,6 +17,12 @@ const STATUS_MAX_CONSECUTIVE_FAILURES = Math.max(
     1,
     Number(process.env.PODCAST_STATUS_MAX_CONSECUTIVE_FAILURES || 5)
 );
+const MCP_REQUEST_TIMEOUT_MS = Number(process.env.PODCAST_MCP_REQUEST_TIMEOUT_MS || 2 * 60 * 1000);
+const MCP_LONG_REQUEST_TIMEOUT_MS = Number(process.env.PODCAST_MCP_LONG_REQUEST_TIMEOUT_MS || 6 * 60 * 1000);
+const DOWNLOAD_MAX_ATTEMPTS = Math.max(
+    1,
+    Number(process.env.PODCAST_DOWNLOAD_MAX_ATTEMPTS || 3)
+);
 const RUN_ONCE = /^true$/i.test(process.env.PODCAST_WORKER_ONCE || '');
 const KEEP_NOTEBOOKS = /^true$/i.test(process.env.PODCAST_KEEP_NOTEBOOKS || '');
 const LOCAL_MCP_COMMAND = path.join(__dirname, '.venv', 'Scripts', 'notebooklm-mcp.exe');
@@ -166,11 +172,44 @@ async function connectMcp() {
     return client;
 }
 
-async function callTool(client, name, args) {
-    const result = await client.callTool({ name, arguments: args });
+async function callTool(client, name, args, options = {}) {
+    const result = await client.callTool(
+        { name, arguments: args },
+        undefined,
+        { timeout: Number(options.timeoutMs || MCP_REQUEST_TIMEOUT_MS) }
+    );
     const payload = extractToolPayload(result);
     assertToolSuccess(name, payload);
     return payload;
+}
+
+async function downloadAudioArtifact(client, job, notebookId, artifactId, audioPath) {
+    for (let attempt = 1; attempt <= DOWNLOAD_MAX_ATTEMPTS; attempt += 1) {
+        try {
+            await callTool(client, 'download_artifact', {
+                notebook_id: notebookId,
+                artifact_type: 'audio',
+                artifact_id: artifactId,
+                output_path: audioPath
+            }, { timeoutMs: MCP_LONG_REQUEST_TIMEOUT_MS });
+            return;
+        } catch (error) {
+            if (attempt >= DOWNLOAD_MAX_ATTEMPTS) throw error;
+            const retryDelayMs = attempt * 15000;
+            console.warn(
+                `[PodcastWorker] Audio download is not ready for ${job.id}; `
+                + `retrying (${attempt}/${DOWNLOAD_MAX_ATTEMPTS})`
+            );
+            await reportProgress(job.id, {
+                status: 'uploading',
+                progress: 90,
+                stage: `NotebookLM audio is ready and still propagating; retrying download (${attempt}/${DOWNLOAD_MAX_ATTEMPTS})`,
+                notebookId,
+                artifactId
+            });
+            await sleep(retryDelayMs);
+        }
+    }
 }
 
 async function waitForAudio(client, jobId, notebookId, artifactId) {
@@ -300,7 +339,7 @@ async function processJob(claim) {
                 file_path: pdfPath,
                 wait: true,
                 wait_timeout: 300
-            });
+            }, { timeoutMs: MCP_LONG_REQUEST_TIMEOUT_MS });
             sourceId = findId(source, ['source_id', 'id']);
             await reportProgress(job.id, {
                 status: 'processing',
@@ -341,12 +380,7 @@ async function processJob(claim) {
             sourceId,
             artifactId
         });
-        await callTool(client, 'download_artifact', {
-            notebook_id: notebookId,
-            artifact_type: 'audio',
-            artifact_id: artifactId,
-            output_path: audioPath
-        });
+        await downloadAudioArtifact(client, job, notebookId, artifactId, audioPath);
 
         await reportProgress(job.id, {
             status: 'uploading',

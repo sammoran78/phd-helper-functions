@@ -1,7 +1,8 @@
 param(
     [switch]$Once,
     [switch]$CheckNotebookLM,
-    [switch]$SkipNotebookLMUpdate
+    [switch]$SkipNotebookLMUpdate,
+    [switch]$UpdateNotebookLMOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,11 +23,13 @@ if (-not $SkipNotebookLMUpdate) {
     if (Test-Path -LiteralPath $venvPython) {
         Write-Host 'Checking for NotebookLM CLI updates...'
         $previousNotebookLMVersion = Get-NotebookLMVersion
-        & $venvPython -m pip --disable-pip-version-check install `
+        & $venvPython -m pip --isolated --disable-pip-version-check install `
             --quiet `
             --upgrade `
-            --timeout 15 `
-            --retries 1 `
+            --no-cache-dir `
+            --index-url 'https://pypi.org/simple' `
+            --timeout 30 `
+            --retries 2 `
             notebooklm-mcp-cli
 
         if ($LASTEXITCODE -ne 0) {
@@ -42,6 +45,10 @@ if (-not $SkipNotebookLMUpdate) {
     } else {
         Write-Warning "NotebookLM virtual environment was not found at $venvPython. Skipping the automatic update."
     }
+}
+
+if ($UpdateNotebookLMOnly) {
+    exit 0
 }
 
 if ($systemNode) {
