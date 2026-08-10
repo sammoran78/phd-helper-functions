@@ -177,6 +177,11 @@ async function run() {
     assert.equal(authResult, undefined);
     assert.match(authResponse.headers['WWW-Authenticate'], /^Bearer /);
 
+    const authGetResponse = await authHandler(makeRequest(null, { method: 'GET' }), context);
+    assert.equal(authGetResponse.status, 401);
+    assert.match(authGetResponse.headers['WWW-Authenticate'], /^Bearer /);
+    assert.match(authGetResponse.headers['WWW-Authenticate'], /resource_metadata=/);
+
     console.log('MCP protocol tests passed');
 }
 

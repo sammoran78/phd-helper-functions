@@ -702,6 +702,21 @@ function createMcpHandler(options = {}) {
         if (request.method === 'OPTIONS') {
             return { status: 204, headers: corsHeaders(request) };
         }
+        if (request.method === 'GET') {
+            const fetchImpl = options.fetchImpl || fetch;
+            const authorize = options.dependencies?.authorize || (req => authorizeRequest(req, fetchImpl));
+            const authorization = await authorize(request);
+            if (!authorization.ok) {
+                const challenge = buildAuthChallenge(request, authorization.reason, authorization.error);
+                return jsonResponse(
+                    request,
+                    authorization.status || 401,
+                    { error: 'unauthorized', error_description: authorization.reason },
+                    { 'WWW-Authenticate': challenge }
+                );
+            }
+            return jsonResponse(request, 405, { error: 'method_not_allowed', error_description: 'Use POST for MCP requests' }, { Allow: 'POST, OPTIONS' });
+        }
         if (request.method !== 'POST') {
             return jsonResponse(request, 405, rpcError(null, -32600, 'MCP Streamable HTTP accepts POST requests'));
         }
@@ -756,7 +771,7 @@ function createMcpHandler(options = {}) {
 }
 
 app.http('PhdRagMcp', {
-    methods: ['POST', 'OPTIONS'],
+    methods: ['GET', 'POST', 'OPTIONS'],
     authLevel: 'anonymous',
     route: 'mcp',
     handler: createMcpHandler()
