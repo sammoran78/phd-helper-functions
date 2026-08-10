@@ -769,7 +769,10 @@ app.http('PhdRagMcpProtectedResourceMetadata', {
     handler: async request => {
         if (!isOriginAllowed(request)) return jsonResponse(request, 403, { error: 'Origin is not allowed' });
         if (request.method === 'OPTIONS') return { status: 204, headers: corsHeaders(request) };
-        const authorizationServer = (process.env.MCP_OAUTH_AUTHORIZATION_SERVER || process.env.MCP_OAUTH_ISSUER || '').replace(/\/$/, '');
+        const configuredAuthorizationServer = (process.env.MCP_OAUTH_AUTHORIZATION_SERVER || process.env.MCP_OAUTH_ISSUER || '').trim();
+        const authorizationServer = configuredAuthorizationServer
+            ? `${configuredAuthorizationServer.replace(/\/+$/, '')}/`
+            : '';
         if (!authorizationServer) {
             return jsonResponse(request, 404, { error: 'OAuth is not configured for this MCP server' });
         }
