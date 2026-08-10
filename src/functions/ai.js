@@ -1,5 +1,6 @@
 const { app } = require('@azure/functions');
 const OpenAI = require('openai');
+const crypto = require('crypto');
 const { getItem, queryItems } = require('../../shared/cosmosClient');
 
 const CONTAINER_PAGES = process.env.COSMOSDB_CONTAINER_PAGES || 'pages';
@@ -18,6 +19,7 @@ const KB_RAG_DETAILED_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_DETAIL
 const KB_RAG_FILE_SEARCH_MAX_RESULTS = parsePositiveInt(process.env.KB_RAG_FILE_SEARCH_MAX_RESULTS, 8);
 const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 24);
 const KB_RAG_STREAM_HEARTBEAT_MS = parsePositiveInt(process.env.KB_RAG_STREAM_HEARTBEAT_MS, 15000);
+const KB_RAG_PROMPT_CACHE_VERSION = 'v2';
 
 let cachedSystemPrompt = {
     value: '',
@@ -261,6 +263,42 @@ function buildRagInput(query, historyText) {
     ].filter(Boolean).join('\n\n');
 }
 
+function supportsExplicitPromptCaching(model) {
+    const match = (model || '').toString().toLowerCase().match(/^gpt-5\.(\d+)(?:-|$)/);
+    return Boolean(match && Number.parseInt(match[1], 10) >= 6);
+}
+
+function supportsExtendedPromptCaching(model) {
+    const normalized = (model || '').toString().toLowerCase();
+    return [
+        /^gpt-5\.5(?:-|$)/,
+        /^gpt-5\.4(?:-|$)/,
+        /^gpt-5\.2(?:-|$)/,
+        /^gpt-5\.1(?:-|$)/,
+        /^gpt-5(?:-|$)/,
+        /^gpt-4\.1(?:-|$)/
+    ].some(pattern => pattern.test(normalized));
+}
+
+function buildPromptCacheKey({ model, vectorStoreId, stableInstructions }) {
+    const digest = crypto
+        .createHash('sha256')
+        .update(JSON.stringify({ model, vectorStoreId, stableInstructions, version: KB_RAG_PROMPT_CACHE_VERSION }))
+        .digest('hex')
+        .slice(0, 32);
+    return `phd-rag-${KB_RAG_PROMPT_CACHE_VERSION}-${digest}`;
+}
+
+function getPromptCacheUsage(response) {
+    const usage = response?.usage || {};
+    const details = usage.input_tokens_details || {};
+    return {
+        inputTokens: Number.isFinite(usage.input_tokens) ? usage.input_tokens : null,
+        cachedTokens: Number.isFinite(details.cached_tokens) ? details.cached_tokens : 0,
+        cacheWriteTokens: Number.isFinite(details.cache_write_tokens) ? details.cache_write_tokens : 0
+    };
+}
+
 function shouldUseDetailedOutputBudget(query) {
     const normalized = (query || '').toString().toLowerCase();
     if (!normalized) return false;
@@ -279,10 +317,31 @@ function getRagOutputTokenBudget(query) {
 
 function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, query }) {
     const maxOutputTokens = getRagOutputTokenBudget(query);
-    return {
+    const stableInstructions = buildRagInstructions(systemPrompt);
+    const explicitPromptCaching = supportsExplicitPromptCaching(model);
+    const stableInstructionBlock = {
+        type: 'input_text',
+        text: stableInstructions,
+        ...(explicitPromptCaching ? { prompt_cache_breakpoint: { mode: 'explicit' } } : {})
+    };
+    const payload = {
         model,
-        instructions: buildRagInstructions(systemPrompt),
-        input: buildRagInput(query, historyText),
+        input: [
+            {
+                type: 'message',
+                role: 'developer',
+                content: [stableInstructionBlock]
+            },
+            {
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: buildRagInput(query, historyText) }]
+            }
+        ],
+        prompt_cache_key: buildPromptCacheKey({ model, vectorStoreId, stableInstructions }),
+        ...(explicitPromptCaching
+            ? { prompt_cache_options: { mode: 'explicit', ttl: '30m' } }
+            : (supportsExtendedPromptCaching(model) ? { prompt_cache_retention: '24h' } : {})),
         max_output_tokens: maxOutputTokens,
         // File-search result attributes and snippets carry the durable
         // referenceId/pageNumber metadata used to hydrate author-year citations.
@@ -297,9 +356,11 @@ function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, quer
         ],
         metadata: {
             rag_output_budget: String(maxOutputTokens),
-            rag_profile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard'
+            rag_profile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard',
+            prompt_cache_profile: explicitPromptCaching ? 'explicit-30m' : 'automatic'
         }
     };
+    return payload;
 }
 
 function extractCitationIds(text) {
@@ -914,6 +975,7 @@ app.http('KBRagChat', {
                 queryChars: query.length,
                 maxOutputTokens: basePayload.max_output_tokens,
                 ragProfile: basePayload.metadata?.rag_profile || 'standard',
+                promptCacheProfile: basePayload.metadata?.prompt_cache_profile || 'automatic',
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
             });
 
@@ -946,11 +1008,13 @@ app.http('KBRagChat', {
             }
 
             const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai, response });
+            const promptCacheUsage = getPromptCacheUsage(response);
             context.log('[KB RAG Chat] Completed', {
                 elapsedMs: Date.now() - requestStartedAt,
                 outputChars: content.length,
                 citations: citations.length,
-                unresolvedCitationIds: unresolvedCitationIds.length
+                unresolvedCitationIds: unresolvedCitationIds.length,
+                ...promptCacheUsage
             });
 
             return withCorsHeaders({
@@ -1040,6 +1104,7 @@ app.http('KBRagChatStream', {
                 queryChars: query.length,
                 maxOutputTokens: basePayload.max_output_tokens,
                 ragProfile: basePayload.metadata?.rag_profile || 'standard',
+                promptCacheProfile: basePayload.metadata?.prompt_cache_profile || 'automatic',
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
             });
 
@@ -1133,12 +1198,14 @@ app.http('KBRagChatStream', {
                             }
 
                             send('done', { content: fullText, citations, unresolvedCitationIds });
+                            const promptCacheUsage = getPromptCacheUsage(completedResponse);
                             context.log('[KB RAG Stream] Completed', {
                                 elapsedMs: Date.now() - requestStartedAt,
                                 firstDeltaMs: firstDeltaAt ? (firstDeltaAt - requestStartedAt) : null,
                                 outputChars: fullText.length,
                                 citations: citations.length,
-                                unresolvedCitationIds: unresolvedCitationIds.length
+                                unresolvedCitationIds: unresolvedCitationIds.length,
+                                ...promptCacheUsage
                             });
                             controller.close();
                         } catch (err) {

@@ -10,6 +10,41 @@ async function run() {
         query: 'Summarise the evidence'
     });
     assert.deepEqual(payload.include, ['file_search_call.results']);
+    assert.equal(payload.input[0].role, 'developer');
+    assert.equal(payload.input[1].role, 'user');
+    assert.match(payload.prompt_cache_key, /^phd-rag-v2-/);
+    assert.equal(payload.instructions, undefined);
+
+    const explicitCachePayload = __test.buildRagPayload({
+        model: 'gpt-5.6-terra',
+        vectorStoreId: 'vs-test',
+        systemPrompt: 'Stable research profile',
+        historyText: 'USER: Earlier context',
+        query: 'Current question'
+    });
+    const secondExplicitCachePayload = __test.buildRagPayload({
+        model: 'gpt-5.6-terra',
+        vectorStoreId: 'vs-test',
+        systemPrompt: 'Stable research profile',
+        historyText: 'USER: Different context',
+        query: 'Different question'
+    });
+    assert.deepEqual(explicitCachePayload.prompt_cache_options, { mode: 'explicit', ttl: '30m' });
+    assert.deepEqual(explicitCachePayload.input[0].content[0].prompt_cache_breakpoint, { mode: 'explicit' });
+    assert.equal(explicitCachePayload.prompt_cache_key, secondExplicitCachePayload.prompt_cache_key);
+    assert.notEqual(explicitCachePayload.input[1].content[0].text, secondExplicitCachePayload.input[1].content[0].text);
+    assert.equal(explicitCachePayload.metadata.prompt_cache_profile, 'explicit-30m');
+
+    const extendedCachePayload = __test.buildRagPayload({
+        model: 'gpt-5.4',
+        vectorStoreId: 'vs-test',
+        systemPrompt: 'Stable research profile',
+        historyText: '',
+        query: 'Current question'
+    });
+    assert.equal(extendedCachePayload.prompt_cache_retention, '24h');
+    assert.equal(extendedCachePayload.prompt_cache_options, undefined);
+    assert.equal(extendedCachePayload.input[0].content[0].prompt_cache_breakpoint, undefined);
 
     const fromSearchResult = __test.buildCitationRecordFromFileSearchResult('file-test', {
         file_name: 'ref_example_page_00003.txt',
