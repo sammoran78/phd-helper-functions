@@ -46,6 +46,9 @@ const blobMock = {
     },
     async deleteBlob(container, blobName) {
         blobs.delete(key(container, blobName));
+    },
+    async blobExists(container, blobName) {
+        return blobs.has(key(container, blobName));
     }
 };
 
@@ -189,11 +192,27 @@ async function run() {
     assert.equal(uploadedPayload.podcast.sizeBytes, audioData.length);
     assert.equal(uploadedPayload.podcast.consumedAt, null);
 
+    const completedJob = items.get(key('jobs', createdPayload.jobId));
+    const referenceWithLostAudioMetadata = items.get(key('references', reference.id));
+    items.set(key('references', reference.id), {
+        ...referenceWithLostAudioMetadata,
+        podcast: {
+            jobId: createdPayload.jobId,
+            status: 'queued',
+            stage: 'Stale reference metadata'
+        }
+    });
+
     const status = await handlers.get('GetReferencePodcast')(
         request({ params: { id: reference.id } }),
         console
     );
-    assert.equal(parseJson(status).podcast.status, 'complete');
+    const repairedStatus = parseJson(status).podcast;
+    assert.equal(repairedStatus.status, 'complete');
+    assert.equal(repairedStatus.blobName, completedJob.blobName);
+    const repairedReference = items.get(key('references', reference.id));
+    assert.equal(repairedReference.podcast.status, 'complete');
+    assert.equal(repairedReference.podcast.blobName, completedJob.blobName);
 
     const audio = await handlers.get('GetReferencePodcastAudio')(
         request({ params: { id: reference.id } }),
@@ -281,6 +300,39 @@ async function run() {
     assert.equal(refreshedReference.podcast.jobId, resetPayload.jobId);
     assert.equal(refreshedReference.podcast.notebookId, null);
     assert.equal(items.get(key('jobs', failedJobId)).status, 'error');
+
+    const missingBlobReference = {
+        id: 'ref-3',
+        title: 'Paper With Missing Podcast Blob',
+        podcast: {
+            jobId: 'podcast-ref-3',
+            status: 'queued'
+        }
+    };
+    const missingBlobJob = {
+        id: 'podcast-ref-3',
+        type: 'podcast-generation',
+        referenceId: missingBlobReference.id,
+        status: 'complete',
+        progress: 100,
+        stage: 'Podcast ready',
+        blobName: 'podcasts/ref-3/missing-audio.mp3',
+        fileName: 'missing-audio.mp3',
+        contentType: 'audio/mpeg'
+    };
+    items.set(key('references', missingBlobReference.id), structuredClone(missingBlobReference));
+    items.set(key('jobs', missingBlobJob.id), structuredClone(missingBlobJob));
+
+    const missingBlobStatus = await handlers.get('GetReferencePodcast')(
+        request({ params: { id: missingBlobReference.id } }),
+        console
+    );
+    assert.equal(parseJson(missingBlobStatus).podcast.status, 'error');
+    const missingBlobAudio = await handlers.get('GetReferencePodcastAudio')(
+        request({ params: { id: missingBlobReference.id } }),
+        console
+    );
+    assert.equal(missingBlobAudio.status, 404);
 
     console.log('Podcast function workflow test passed');
 }

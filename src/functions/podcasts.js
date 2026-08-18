@@ -9,7 +9,8 @@ const {
 const {
     uploadBlob,
     downloadBlob,
-    deleteBlob
+    deleteBlob,
+    blobExists
 } = require('../../shared/blobClient');
 const {
     verifyDashboardRequest,
@@ -69,18 +70,25 @@ function findPdf(reference) {
 }
 
 function podcastPayload(reference, job = null) {
-    const podcast = reference?.podcast || null;
-    if (!podcast) {
+    const podcast = reference?.podcast || {};
+    if (!reference?.podcast && !job) {
         return { status: 'not_created', progress: 0, stage: 'Ready to create' };
     }
+    const completedJobMissingAudio = job?.status === 'complete' && !podcast.blobName;
     return {
         ...podcast,
-        status: job?.status || podcast.status || 'not_created',
+        status: completedJobMissingAudio
+            ? 'error'
+            : job?.status || podcast.status || 'not_created',
         progress: Number.isFinite(Number(job?.progress))
             ? Number(job.progress)
             : Number(podcast.progress || 0),
-        stage: job?.stage || podcast.stage || '',
-        error: job?.error || podcast.error || null,
+        stage: completedJobMissingAudio
+            ? 'Podcast audio metadata needs repair'
+            : job?.stage || podcast.stage || '',
+        error: completedJobMissingAudio
+            ? 'The completed podcast job is missing usable audio metadata on its reference.'
+            : job?.error || podcast.error || null,
         lastUpdated: job?.lastUpdated || podcast.lastUpdated || null
     };
 }
@@ -103,6 +111,43 @@ async function updatePodcastReference(reference, patch) {
     return updated;
 }
 
+function completedPodcastPatchFromJob(job) {
+    if (job?.status !== 'complete' || !job.blobName) return null;
+    return {
+        status: 'complete',
+        progress: 100,
+        stage: 'Podcast ready',
+        error: null,
+        provider: 'notebooklm',
+        format: 'deep_dive',
+        jobId: job.id,
+        notebookId: job.notebookId || null,
+        sourceId: job.sourceId || null,
+        artifactId: job.artifactId || null,
+        blobName: job.blobName,
+        url: job.audioUrl || job.url || null,
+        fileName: job.fileName || 'audio-overview.mp3',
+        contentType: job.contentType || 'audio/mpeg',
+        sizeBytes: Number(job.sizeBytes || 0),
+        completedAt: job.completedAt || job.lastUpdated || nowIso()
+    };
+}
+
+async function repairCompletedPodcastReference(reference, job, context) {
+    if (reference?.podcast?.status === 'complete' && reference.podcast.blobName) {
+        return reference;
+    }
+    const patch = completedPodcastPatchFromJob(job);
+    if (!patch) return reference;
+    if (!(await blobExists(UPLOADS_CONTAINER, patch.blobName))) {
+        context?.warn?.(`Completed podcast blob is missing for ${reference.id}: ${patch.blobName}`);
+        return reference;
+    }
+    const repaired = await updatePodcastReference(reference, patch);
+    context?.log?.(`Repaired podcast metadata for reference ${reference.id} from job ${job.id}`);
+    return repaired;
+}
+
 async function requireReference(referenceId) {
     return getItem(REFERENCES_CONTAINER, referenceId, referenceId);
 }
@@ -119,7 +164,7 @@ app.http('CreateReferencePodcast', {
     handler: async (request, context) => {
         if (!verifyDashboardRequest(request)) return unauthorized();
         try {
-            const reference = await requireReference(request.params.id);
+            let reference = await requireReference(request.params.id);
             if (!reference) return json(404, { error: 'Reference not found' });
             const pdf = findPdf(reference);
             if (!pdf) return json(400, { error: 'This reference does not have an attached PDF' });
@@ -133,6 +178,7 @@ app.http('CreateReferencePodcast', {
             } catch {}
 
             const existing = await loadPodcastJob(reference);
+            reference = await repairCompletedPodcastReference(reference, existing, context);
             if (reference.podcast?.status === 'complete' && reference.podcast?.blobName && !retry) {
                 return json(200, {
                     success: true,
@@ -232,9 +278,10 @@ app.http('GetReferencePodcast', {
     handler: async (request, context) => {
         if (!verifyDashboardRequest(request)) return unauthorized();
         try {
-            const reference = await requireReference(request.params.id);
+            let reference = await requireReference(request.params.id);
             if (!reference) return json(404, { error: 'Reference not found' });
             const job = await loadPodcastJob(reference);
+            reference = await repairCompletedPodcastReference(reference, job, context);
             return json(200, { podcast: podcastPayload(reference, job) });
         } catch (error) {
             context.error('Get Reference Podcast Error:', error);
@@ -250,8 +297,10 @@ app.http('GetReferencePodcastAudio', {
     handler: async (request, context) => {
         if (!verifyDashboardRequest(request)) return unauthorized();
         try {
-            const reference = await requireReference(request.params.id);
+            let reference = await requireReference(request.params.id);
             if (!reference) return json(404, { error: 'Reference not found' });
+            const job = await loadPodcastJob(reference);
+            reference = await repairCompletedPodcastReference(reference, job, context);
             const podcast = reference.podcast;
             if (podcast?.status !== 'complete' || !podcast?.blobName) {
                 return json(404, { error: 'Podcast audio is not available' });
@@ -283,8 +332,10 @@ app.http('MarkReferencePodcastConsumed', {
     handler: async (request, context) => {
         if (!verifyDashboardRequest(request)) return unauthorized();
         try {
-            const reference = await requireReference(request.params.id);
+            let reference = await requireReference(request.params.id);
             if (!reference) return json(404, { error: 'Reference not found' });
+            const job = await loadPodcastJob(reference);
+            reference = await repairCompletedPodcastReference(reference, job, context);
             if (reference.podcast?.status !== 'complete' || !reference.podcast?.blobName) {
                 return json(409, { error: 'Podcast audio is not available' });
             }
