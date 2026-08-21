@@ -7,7 +7,7 @@ Azure Functions backend for the PhD Helper Dashboard, replacing the Express.js s
 - **CosmosDB**: Stores references, projects, analytics data
 - **Blob Storage**: Stores uploaded PDFs and documents
 - **Azure Functions**: Serverless API endpoints
-- **OpenAI**: LLM analysis for references
+- **OpenAI + Anthropic**: Selectable RAG chat generation, with OpenAI-backed corpus retrieval
 
 ## Prerequisites
 
@@ -104,6 +104,9 @@ npm install
    OPENAI_API_KEY=<your_openai_api_key>
    OPENAI_MODEL=gpt-4o-mini
    OPENAI_REASONING_EFFORT=low
+   ANTHROPIC_API_KEY=<your_anthropic_api_key>
+   ANTHROPIC_MODEL=<your_anthropic_model>
+   ANTHROPIC_REASONING_EFFORT=high
    ```
 3. **Save** the configuration
 
@@ -126,10 +129,15 @@ Create a `.env` file or update `local.settings.json`:
     "BLOB_CONTAINER_UPLOADS": "uploads",
     "OPENAI_API_KEY": "<your_key>",
     "OPENAI_MODEL": "gpt-4o-mini",
-    "OPENAI_REASONING_EFFORT": "low"
+    "OPENAI_REASONING_EFFORT": "low",
+    "ANTHROPIC_API_KEY": "<your_key>",
+    "ANTHROPIC_MODEL": "<your_anthropic_model>",
+    "ANTHROPIC_REASONING_EFFORT": "high"
   }
 }
 ```
+
+The RAG chat defaults to OpenAI. When Anthropic is selected, the Function App uses the existing OpenAI vector store to retrieve corpus excerpts, then sends those excerpts to the configured Anthropic model to generate the cited answer. Reasoning is enabled by default for both providers and its effort is controlled by the provider-specific environment variable.
 
 ### 4. Migrate Existing Data
 
