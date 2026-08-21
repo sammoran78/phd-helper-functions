@@ -1,0 +1,16 @@
+{
+  "name": "phd-helper-podcast-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local NotebookLM MCP worker for PhD Helper podcast generation",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node podcast-worker.js",
+    "once": "set PODCAST_WORKER_ONCE=true&& node podcast-worker.js",
+    "check": "node --check podcast-worker.js && node --check check-notebooklm.js",
+    "check:notebooklm": "node check-notebooklm.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4"
+  }
+}

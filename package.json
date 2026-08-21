@@ -5,7 +5,11 @@
   "main": "src/index.js",
   "scripts": {
     "start": "func start",
+<<<<<<< HEAD
     "test": "node --test test/*.test.js"
+=======
+    "test": "node --check src/functions/newsreader.js && node --check src/functions/analytics.js && node --check src/functions/ai.js && node --check src/functions/mcp.js && node --check src/functions/references.js && node --check shared/researchSearchPrompt.js && node --check src/functions/podcasts.js && node --check shared/requestAuth.js && node --check worker/podcast-worker.js && node scripts/test-ai-citations.js && node scripts/test-bibliography-export.js && node scripts/test-podcasts.js && node scripts/test-mcp.js"
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",

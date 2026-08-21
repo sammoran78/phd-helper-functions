@@ -1,5 +1,6 @@
 const { app } = require('@azure/functions');
 const OpenAI = require('openai');
+const crypto = require('crypto');
 const { getItem, queryItems } = require('../../shared/cosmosClient');
 const {
     CHAT_PROVIDERS,
@@ -30,7 +31,11 @@ const KB_RAG_DETAILED_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_DETAIL
 const KB_RAG_FILE_SEARCH_MAX_RESULTS = parsePositiveInt(process.env.KB_RAG_FILE_SEARCH_MAX_RESULTS, 8);
 const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 24);
 const KB_RAG_STREAM_HEARTBEAT_MS = parsePositiveInt(process.env.KB_RAG_STREAM_HEARTBEAT_MS, 15000);
+<<<<<<< HEAD
 const KB_RAG_ANTHROPIC_MAX_CONTEXT_CHARS = parsePositiveInt(process.env.KB_RAG_ANTHROPIC_MAX_CONTEXT_CHARS, 24000);
+=======
+const KB_RAG_PROMPT_CACHE_VERSION = 'v2';
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
 
 let cachedSystemPrompt = {
     value: '',
@@ -275,6 +280,42 @@ function buildRagInput(query, historyText) {
     ].filter(Boolean).join('\n\n');
 }
 
+function supportsExplicitPromptCaching(model) {
+    const match = (model || '').toString().toLowerCase().match(/^gpt-5\.(\d+)(?:-|$)/);
+    return Boolean(match && Number.parseInt(match[1], 10) >= 6);
+}
+
+function supportsExtendedPromptCaching(model) {
+    const normalized = (model || '').toString().toLowerCase();
+    return [
+        /^gpt-5\.5(?:-|$)/,
+        /^gpt-5\.4(?:-|$)/,
+        /^gpt-5\.2(?:-|$)/,
+        /^gpt-5\.1(?:-|$)/,
+        /^gpt-5(?:-|$)/,
+        /^gpt-4\.1(?:-|$)/
+    ].some(pattern => pattern.test(normalized));
+}
+
+function buildPromptCacheKey({ model, vectorStoreId, stableInstructions }) {
+    const digest = crypto
+        .createHash('sha256')
+        .update(JSON.stringify({ model, vectorStoreId, stableInstructions, version: KB_RAG_PROMPT_CACHE_VERSION }))
+        .digest('hex')
+        .slice(0, 32);
+    return `phd-rag-${KB_RAG_PROMPT_CACHE_VERSION}-${digest}`;
+}
+
+function getPromptCacheUsage(response) {
+    const usage = response?.usage || {};
+    const details = usage.input_tokens_details || {};
+    return {
+        inputTokens: Number.isFinite(usage.input_tokens) ? usage.input_tokens : null,
+        cachedTokens: Number.isFinite(details.cached_tokens) ? details.cached_tokens : 0,
+        cacheWriteTokens: Number.isFinite(details.cache_write_tokens) ? details.cache_write_tokens : 0
+    };
+}
+
 function shouldUseDetailedOutputBudget(query) {
     const normalized = (query || '').toString().toLowerCase();
     if (!normalized) return false;
@@ -327,11 +368,36 @@ function buildAnthropicPayload({ model, systemPrompt, historyText, query, search
 
 function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, query }) {
     const maxOutputTokens = getRagOutputTokenBudget(query);
-    return {
+    const stableInstructions = buildRagInstructions(systemPrompt);
+    const explicitPromptCaching = supportsExplicitPromptCaching(model);
+    const stableInstructionBlock = {
+        type: 'input_text',
+        text: stableInstructions,
+        ...(explicitPromptCaching ? { prompt_cache_breakpoint: { mode: 'explicit' } } : {})
+    };
+    const payload = {
         model,
-        instructions: buildRagInstructions(systemPrompt),
-        input: buildRagInput(query, historyText),
+        input: [
+            {
+                type: 'message',
+                role: 'developer',
+                content: [stableInstructionBlock]
+            },
+            {
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_text', text: buildRagInput(query, historyText) }]
+            }
+        ],
+        prompt_cache_key: buildPromptCacheKey({ model, vectorStoreId, stableInstructions }),
+        ...(explicitPromptCaching
+            ? { prompt_cache_options: { mode: 'explicit', ttl: '30m' } }
+            : (supportsExtendedPromptCaching(model) ? { prompt_cache_retention: '24h' } : {})),
         max_output_tokens: maxOutputTokens,
+        // File-search result attributes and snippets carry the durable
+        // referenceId/pageNumber metadata used to hydrate author-year citations.
+        // Keep this on the base payload so every retry path preserves it.
+        include: ['file_search_call.results'],
         tools: [
             {
                 type: 'file_search',
@@ -341,9 +407,11 @@ function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, quer
         ],
         metadata: {
             rag_output_budget: String(maxOutputTokens),
-            rag_profile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard'
+            rag_profile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard',
+            prompt_cache_profile: explicitPromptCaching ? 'explicit-30m' : 'automatic'
         }
     };
+    return payload;
 }
 
 function extractCitationIds(text) {
@@ -419,6 +487,23 @@ function parseDocMetadataFromText(text) {
     return meta;
 }
 
+function getCitationMetadataValue(metadata = {}, ...names) {
+    if (!metadata || typeof metadata !== 'object') return '';
+
+    const normalized = new Map(
+        Object.entries(metadata).map(([key, value]) => [
+            key.toLowerCase().replace(/[^a-z0-9]/g, ''),
+            value
+        ])
+    );
+
+    for (const name of names) {
+        const value = normalized.get(name.toLowerCase().replace(/[^a-z0-9]/g, ''));
+        if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return '';
+}
+
 function getFileSearchResultAttributes(result = {}) {
     return result.attributes
         || result.file_attributes
@@ -475,13 +560,13 @@ function buildCitationRecordFromFileSearchResult(fileId, result = {}, options = 
     const parsed = parseReferencePageFromVectorFileName(filename);
 
     return buildCitationRecord(fileId, {
-        referenceId: attrs.referenceId || attrs.reference_id || docMeta.referenceId || parsed?.referenceId,
-        pageNumber: attrs.pageNumber || attrs.page_number || docMeta.pageNumber || parsed?.pageNumber,
-        title: attrs.title || docMeta.title || filename,
-        authors: attrs.authors || attrs.author || docMeta.authors,
-        year: attrs.year || docMeta.year,
-        source: attrs.source || docMeta.source,
-        pageUrl: attrs.blobUrl || attrs.blob_url || attrs.pageUrl || attrs.page_url,
+        referenceId: getCitationMetadataValue(attrs, 'referenceId') || getCitationMetadataValue(docMeta, 'referenceId') || parsed?.referenceId,
+        pageNumber: getCitationMetadataValue(attrs, 'pageNumber') || getCitationMetadataValue(docMeta, 'pageNumber') || parsed?.pageNumber,
+        title: getCitationMetadataValue(attrs, 'title') || getCitationMetadataValue(docMeta, 'title') || filename,
+        authors: getCitationMetadataValue(attrs, 'authors', 'author') || getCitationMetadataValue(docMeta, 'authors', 'author'),
+        year: getCitationMetadataValue(attrs, 'year') || getCitationMetadataValue(docMeta, 'year'),
+        source: getCitationMetadataValue(attrs, 'source') || getCitationMetadataValue(docMeta, 'source'),
+        pageUrl: getCitationMetadataValue(attrs, 'blobUrl', 'pageUrl'),
         filename
     }, {
         resolutionStatus: options.resolutionStatus || 'resolved_from_file_search_result'
@@ -498,8 +583,8 @@ async function resolveCitationFromFileSearchResult(fileId, result = {}, options 
     const docMeta = parseDocMetadataFromText(result.text || result.content || result.snippet || '');
     const filename = getFileSearchResultFilename(result);
     const parsedFromFilename = parseReferencePageFromVectorFileName(filename);
-    const referenceId = attrs.referenceId || attrs.reference_id || docMeta.referenceId || parsedFromFilename?.referenceId;
-    const rawPageNumber = attrs.pageNumber || attrs.page_number || docMeta.pageNumber || parsedFromFilename?.pageNumber;
+    const referenceId = getCitationMetadataValue(attrs, 'referenceId') || getCitationMetadataValue(docMeta, 'referenceId') || parsedFromFilename?.referenceId;
+    const rawPageNumber = getCitationMetadataValue(attrs, 'pageNumber') || getCitationMetadataValue(docMeta, 'pageNumber') || parsedFromFilename?.pageNumber;
     const pageNumber = Number.parseInt(rawPageNumber, 10);
 
     if (referenceId && Number.isFinite(pageNumber)) {
@@ -709,6 +794,31 @@ async function resolveCitationFromOpenAiFileRecord(fileId, options = {}) {
     }
 }
 
+async function resolveCitationFromVectorStoreFile(fileId, options = {}) {
+    const openai = options?.openai;
+    const vectorStoreId = options?.vectorStoreId || process.env.OPENAI_VECTOR_STORE;
+    const context = options?.context;
+    if (!openai?.vectorStores?.files || !vectorStoreId || !fileId) return null;
+
+    try {
+        const [vectorFile, fileRecord] = await Promise.all([
+            openai.vectorStores.files.retrieve(vectorStoreId, fileId),
+            openai.files.retrieve(fileId).catch(() => null)
+        ]);
+        const result = {
+            file_id: fileId,
+            filename: fileRecord?.filename || fileRecord?.name || '',
+            attributes: vectorFile?.attributes || {}
+        };
+        return await resolveCitationFromFileSearchResult(fileId, result, {
+            resolutionStatus: 'resolved_from_vector_store_metadata'
+        });
+    } catch (error) {
+        context?.warn?.(`[KB RAG] Vector store metadata lookup failed for ${fileId}:`, error?.message || String(error));
+        return null;
+    }
+}
+
 function buildApa7Fallback(reference) {
     const authors = reference?.authors || reference?.author || 'Unknown Author';
     const year = reference?.year || 'n.d.';
@@ -758,13 +868,18 @@ async function lookupCitationByFileId(fileId, options = {}) {
     }
 
     const pages = await queryItems(CONTAINER_PAGES, {
-        query: 'SELECT TOP 1 * FROM c WHERE IS_DEFINED(c.openaiVector) AND c.openaiVector.fileId = @fileId',
+        query: `SELECT TOP 1 * FROM c
+            WHERE IS_DEFINED(c.openaiVector)
+            AND (c.openaiVector.fileId = @fileId OR c.openaiVector.vectorStoreFileId = @fileId)`,
         parameters: [{ name: '@fileId', value: fileId }]
     });
     const page = Array.isArray(pages) && pages.length > 0 ? pages[0] : null;
     if (!page) {
+        const vectorStoreResolved = await resolveCitationFromVectorStoreFile(fileId, options);
+        if (vectorStoreResolved?.resolved) return vectorStoreResolved;
         const openAiResolved = await resolveCitationFromOpenAiFileRecord(fileId, options);
         if (openAiResolved) return openAiResolved;
+        if (vectorStoreResolved) return vectorStoreResolved;
         if (fileSearchResult) return await resolveCitationFromFileSearchResult(fileId, fileSearchResult, { resolutionStatus: 'file_search_result_metadata_incomplete' });
         return buildCitationRecord(fileId, {}, { resolutionStatus: 'page_not_found' });
     }
@@ -940,6 +1055,7 @@ app.http('KBRagChat', {
                 useReasoning,
                 historyChars: historyText.length,
                 queryChars: query.length,
+<<<<<<< HEAD
                 maxOutputTokens,
                 ragProfile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard',
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
@@ -999,6 +1115,27 @@ app.http('KBRagChat', {
                     } else {
                         response = await openai.responses.create(basePayload);
                     }
+=======
+                maxOutputTokens: basePayload.max_output_tokens,
+                ragProfile: basePayload.metadata?.rag_profile || 'standard',
+                promptCacheProfile: basePayload.metadata?.prompt_cache_profile || 'automatic',
+                maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
+            });
+
+            let response;
+            try {
+                response = await openai.responses.create({
+                    ...basePayload,
+                    ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+                });
+            } catch (err) {
+                const msg = (err && err.message) ? err.message : String(err);
+                if (useReasoning && reasoningEffort) {
+                    context.warn('[KB RAG Chat] reasoning_effort rejected; retrying without it. Error:', msg);
+                    response = await openai.responses.create(basePayload);
+                } else {
+                    throw err;
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
                 }
                 content = getOutputText(response);
             }
@@ -1013,17 +1150,23 @@ app.http('KBRagChat', {
                 }
             }
 
+<<<<<<< HEAD
             const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, {
                 openai,
                 response: provider === CHAT_PROVIDERS.OPENAI ? response : null,
                 fileSearchResultMap
             });
+=======
+            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai, response });
+            const promptCacheUsage = getPromptCacheUsage(response);
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
             context.log('[KB RAG Chat] Completed', {
                 elapsedMs: Date.now() - requestStartedAt,
                 provider,
                 outputChars: content.length,
                 citations: citations.length,
-                unresolvedCitationIds: unresolvedCitationIds.length
+                unresolvedCitationIds: unresolvedCitationIds.length,
+                ...promptCacheUsage
             });
 
             return withCorsHeaders({
@@ -1162,10 +1305,16 @@ app.http('KBRagChatStream', {
                 useReasoning,
                 historyChars: historyText.length,
                 queryChars: query.length,
+<<<<<<< HEAD
                 maxOutputTokens: provider === CHAT_PROVIDERS.ANTHROPIC
                     ? anthropicPayload.max_tokens
                     : basePayload.max_output_tokens,
                 ragProfile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard',
+=======
+                maxOutputTokens: basePayload.max_output_tokens,
+                ragProfile: basePayload.metadata?.rag_profile || 'standard',
+                promptCacheProfile: basePayload.metadata?.prompt_cache_profile || 'automatic',
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
             });
 
@@ -1201,6 +1350,7 @@ app.http('KBRagChatStream', {
                         let firstDeltaAt = 0;
                         let streamDeliveredText = false;
                         try {
+<<<<<<< HEAD
                             const handleTextDelta = (delta) => {
                                 if (!delta) return;
                                 if (!firstDeltaAt) {
@@ -1209,6 +1359,22 @@ app.http('KBRagChatStream', {
                                         provider,
                                         firstDeltaMs: firstDeltaAt - requestStartedAt
                                     });
+=======
+                            let openaiStream;
+                            try {
+                                openaiStream = await openai.responses.create({
+                                    ...basePayload,
+                                    stream: true,
+                                    ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
+                                });
+                            } catch (err) {
+                                const msg = (err && err.message) ? err.message : String(err);
+                                if (useReasoning && reasoningEffort) {
+                                    context.warn('[KB RAG Stream] reasoning_effort rejected; retrying without it. Error:', msg);
+                                    openaiStream = await openai.responses.create({ ...basePayload, stream: true });
+                                } else {
+                                    throw err;
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
                                 }
                                 fullText += delta;
                                 streamDeliveredText = true;
@@ -1292,14 +1458,20 @@ app.http('KBRagChatStream', {
                                 });
                             }
 
+<<<<<<< HEAD
                             send('done', { content: fullText, citations, unresolvedCitationIds, provider, model });
+=======
+                            send('done', { content: fullText, citations, unresolvedCitationIds });
+                            const promptCacheUsage = getPromptCacheUsage(completedResponse);
+>>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
                             context.log('[KB RAG Stream] Completed', {
                                 elapsedMs: Date.now() - requestStartedAt,
                                 provider,
                                 firstDeltaMs: firstDeltaAt ? (firstDeltaAt - requestStartedAt) : null,
                                 outputChars: fullText.length,
                                 citations: citations.length,
-                                unresolvedCitationIds: unresolvedCitationIds.length
+                                unresolvedCitationIds: unresolvedCitationIds.length,
+                                ...promptCacheUsage
                             });
                             controller.close();
                         } catch (err) {
@@ -1346,3 +1518,13 @@ app.http('KBRagChatStream', {
         }
     }
 });
+
+module.exports = {
+    __test: {
+        buildRagPayload,
+        buildCitationRecordFromFileSearchResult,
+        getCitationMetadataValue,
+        parseDocMetadataFromText,
+        resolveCitationFromVectorStoreFile
+    }
+};

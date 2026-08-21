@@ -110,6 +110,10 @@ npm install
    ```
 3. **Save** the configuration
 
+#### RAG prompt caching
+
+Both `/kb/rag-chat` and `/kb/rag-chat/stream` use the same cache-optimised request builder. Stable research instructions and the corpus profile are placed before conversation history and the current question, and a stable `prompt_cache_key` is reused while that prefix is unchanged. GPT-5.6-family models use an explicit 30-minute breakpoint; supported earlier model families use 24-hour retention, while other recent models retain automatic prompt caching. Azure logs report `cachedTokens` and `cacheWriteTokens` for completed RAG requests.
+
 ### 3. Configure Local Development
 
 Create a `.env` file or update `local.settings.json`:

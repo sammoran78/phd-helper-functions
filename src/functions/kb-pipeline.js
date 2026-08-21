@@ -1,6 +1,7 @@
 const { app } = require('@azure/functions');
 const { downloadBlob, uploadBlob } = require('../../shared/blobClient');
 const { getItem, upsertItem, createItem, queryItems } = require('../../shared/cosmosClient');
+const { verifyDashboardRequest } = require('../../shared/requestAuth');
 const { PDFDocument } = require('pdf-lib');
 const OpenAI = require('openai');
 
@@ -12,6 +13,7 @@ const BLOB_CONTAINER_PAGES = process.env.BLOB_CONTAINER_PAGES || 'pages';
 const JOB_TTL_SECONDS = 7200; // Auto-delete job records after 2 hours
 const OCR_TIMEOUT_MS = Number(process.env.KB_OCR_TIMEOUT_MS || 120000);
 const VECTORIZE_TIMEOUT_MS = Number(process.env.KB_VECTORIZE_TIMEOUT_MS || 180000);
+const OCR_RESULT_MAX_CHARS = Number(process.env.KB_OCR_RESULT_MAX_CHARS || 1000000);
 
 // CORS headers helper
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
@@ -25,6 +27,22 @@ function withCorsHeaders(response) {
             'Access-Control-Allow-Headers': 'Content-Type, Authorization'
         }
     };
+}
+
+function dashboardUnauthorized() {
+    return withCorsHeaders({
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'Unauthorized' })
+    });
+}
+
+function jsonResponse(status, payload) {
+    return withCorsHeaders({
+        status,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
 }
 
 async function withTimeout(promise, timeoutMs, label) {
@@ -827,6 +845,276 @@ app.http('KBOCRPages', {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ error: 'Failed to OCR pages', details: error.message })
             });
+        }
+    }
+});
+
+function isCompletedOcrPage(page) {
+    return page?.ocrStatus === 1
+        && typeof page?.ocrText === 'string'
+        && page.ocrText.trim().length > 0;
+}
+
+function summarizeOcrPages(pages = []) {
+    const pagesSucceeded = pages.filter(isCompletedOcrPage).length;
+    const pagesFailed = pages.filter(page => page?.ocrStatus === -1).length;
+    return {
+        totalPages: pages.length,
+        pagesSucceeded,
+        pagesFailed,
+        pagesCompleted: pagesSucceeded + pagesFailed
+    };
+}
+
+async function finalizeBrowserOcrJob(reference, jobRecord, summary) {
+    const now = new Date().toISOString();
+    const allSucceeded = summary.pagesFailed === 0
+        && summary.pagesSucceeded === summary.totalPages;
+    const newStatus = allSucceeded ? 2 : (reference.ref_knowledge_status || 1);
+    const finalStatus = summary.pagesFailed > 0 ? 'complete_with_errors' : 'complete';
+
+    await upsertItem(CONTAINER_REFERENCES, {
+        ...reference,
+        ref_knowledge_status: newStatus,
+        kb_ocr_completed: now,
+        kb_ocr_pages_succeeded: summary.pagesSucceeded,
+        kb_ocr_pages_failed: summary.pagesFailed
+    });
+
+    await upsertItem(CONTAINER_JOBS, {
+        ...jobRecord,
+        ...summary,
+        status: finalStatus,
+        completedAt: now,
+        lastUpdated: now,
+        error: summary.pagesFailed > 0 ? `${summary.pagesFailed} page(s) failed` : null,
+        ttl: JOB_TTL_SECONDS
+    });
+
+    return { newStatus, finalStatus };
+}
+
+// POST /api/kb/ocr-local/{referenceId}/start
+// Creates a resumable job and returns page identifiers to the authenticated browser.
+app.http('KBLocalOCRStart', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'kb/ocr-local/{referenceId}/start',
+    handler: async (request, context) => {
+        if (!verifyDashboardRequest(request)) return dashboardUnauthorized();
+
+        const referenceId = request.params.referenceId;
+        let requestedJobId = '';
+        try {
+            const body = await request.json();
+            requestedJobId = typeof body?.jobId === 'string' ? body.jobId.trim() : '';
+        } catch {}
+
+        if (!requestedJobId || requestedJobId.length > 200) {
+            return jsonResponse(400, { error: 'A valid jobId is required' });
+        }
+
+        try {
+            const reference = await getItem(CONTAINER_REFERENCES, referenceId, referenceId);
+            if (!reference) return jsonResponse(404, { error: 'Reference not found' });
+
+            const pages = await queryItems(CONTAINER_PAGES, {
+                query: 'SELECT * FROM c WHERE c.referenceId = @referenceId ORDER BY c.pdfPageNumber',
+                parameters: [{ name: '@referenceId', value: referenceId }]
+            });
+            if (!pages?.length) {
+                return jsonResponse(400, {
+                    error: 'No split pages found for this reference. Run Step 1 first.'
+                });
+            }
+
+            // A new browser job retries every non-successful page. Reset stale failures or
+            // interrupted "processing" states so they cannot make the job finish early.
+            for (const page of pages) {
+                if (isCompletedOcrPage(page)) continue;
+                Object.assign(page, {
+                    ocrStatus: 0,
+                    ocrText: null,
+                    ocrError: null,
+                    ocrCompletedAt: null
+                });
+                await upsertItem(CONTAINER_PAGES, page);
+            }
+
+            const summary = summarizeOcrPages(pages);
+            const now = new Date().toISOString();
+            const jobRecord = {
+                id: requestedJobId,
+                referenceId,
+                type: 'ocr-pages-local',
+                provider: 'browser-localhost',
+                status: summary.pagesCompleted === summary.totalPages ? 'finalizing' : 'processing',
+                ...summary,
+                pagesFailed: 0,
+                pagesCompleted: summary.pagesSucceeded,
+                retryTotal: 0,
+                retryCompleted: 0,
+                currentPage: 0,
+                startedAt: now,
+                lastUpdated: now,
+                ttl: JOB_TTL_SECONDS
+            };
+            await upsertItem(CONTAINER_JOBS, jobRecord);
+
+            const pendingPages = pages
+                .filter(page => !isCompletedOcrPage(page))
+                .map(page => ({
+                    id: page.id,
+                    pageNumber: page.pageNumber,
+                    pdfPageNumber: page.pdfPageNumber
+                }));
+
+            let completion = null;
+            if (pendingPages.length === 0) {
+                completion = await finalizeBrowserOcrJob(reference, jobRecord, summarizeOcrPages(pages));
+            }
+
+            return jsonResponse(200, {
+                success: true,
+                jobId: requestedJobId,
+                referenceId,
+                totalPages: pages.length,
+                pagesSucceeded: summary.pagesSucceeded,
+                pagesFailed: 0,
+                pages: pendingPages,
+                newStatus: completion?.newStatus || reference.ref_knowledge_status || 1,
+                status: completion?.finalStatus || 'processing'
+            });
+        } catch (error) {
+            context.error('[KB Local OCR Start] Error:', error);
+            return jsonResponse(500, { error: 'Failed to start local OCR', details: error.message });
+        }
+    }
+});
+
+// GET /api/kb/ocr-local/{referenceId}/pages/{pageId}
+// Proxies one private page PDF to the authenticated browser without exposing blob storage.
+app.http('KBLocalOCRPage', {
+    methods: ['GET'],
+    authLevel: 'anonymous',
+    route: 'kb/ocr-local/{referenceId}/pages/{pageId}',
+    handler: async (request, context) => {
+        if (!verifyDashboardRequest(request)) return dashboardUnauthorized();
+
+        const { referenceId, pageId } = request.params;
+        try {
+            const page = await getItem(CONTAINER_PAGES, pageId, pageId);
+            if (!page || page.referenceId !== referenceId) {
+                return jsonResponse(404, { error: 'Page not found' });
+            }
+            if (!page.blobName) return jsonResponse(409, { error: 'Page PDF is unavailable' });
+
+            const pdfBuffer = await downloadBlob(BLOB_CONTAINER_PAGES, page.blobName);
+            return withCorsHeaders({
+                status: 200,
+                headers: {
+                    'Content-Type': 'application/pdf',
+                    'Content-Disposition': `inline; filename="page-${page.pdfPageNumber || page.pageNumber}.pdf"`,
+                    'Cache-Control': 'private, no-store'
+                },
+                body: pdfBuffer
+            });
+        } catch (error) {
+            context.error('[KB Local OCR Page] Error:', error);
+            return jsonResponse(500, { error: 'Failed to download OCR page', details: error.message });
+        }
+    }
+});
+
+// POST /api/kb/ocr-local/{referenceId}/pages/{pageId}/result
+// Persists one browser-produced OCR result and finalizes the job after the last page.
+app.http('KBLocalOCRResult', {
+    methods: ['POST'],
+    authLevel: 'anonymous',
+    route: 'kb/ocr-local/{referenceId}/pages/{pageId}/result',
+    handler: async (request, context) => {
+        if (!verifyDashboardRequest(request)) return dashboardUnauthorized();
+
+        const { referenceId, pageId } = request.params;
+        let body;
+        try {
+            body = await request.json();
+        } catch {
+            return jsonResponse(400, { error: 'A JSON result body is required' });
+        }
+
+        const jobId = typeof body?.jobId === 'string' ? body.jobId.trim() : '';
+        const text = typeof body?.text === 'string' ? body.text.trim() : '';
+        const resultError = typeof body?.error === 'string' ? body.error.trim().slice(0, 2000) : '';
+        if (!jobId) return jsonResponse(400, { error: 'jobId is required' });
+        if (!text && !resultError) return jsonResponse(400, { error: 'OCR text or an error is required' });
+        if (text.length > OCR_RESULT_MAX_CHARS) {
+            return jsonResponse(413, { error: `OCR text exceeds ${OCR_RESULT_MAX_CHARS} characters` });
+        }
+
+        try {
+            const [job, page, reference] = await Promise.all([
+                getItem(CONTAINER_JOBS, jobId, jobId),
+                getItem(CONTAINER_PAGES, pageId, pageId),
+                getItem(CONTAINER_REFERENCES, referenceId, referenceId)
+            ]);
+            if (!job || job.referenceId !== referenceId || job.type !== 'ocr-pages-local') {
+                return jsonResponse(404, { error: 'Local OCR job not found' });
+            }
+            if (!page || page.referenceId !== referenceId) {
+                return jsonResponse(404, { error: 'Page not found' });
+            }
+            if (!reference) return jsonResponse(404, { error: 'Reference not found' });
+
+            const now = new Date().toISOString();
+            if (!isCompletedOcrPage(page)) {
+                await upsertItem(CONTAINER_PAGES, {
+                    ...page,
+                    ocrStatus: text ? 1 : -1,
+                    ocrText: text || null,
+                    ocrError: text ? null : (resultError || 'Local OCR failed'),
+                    ocrAttempt: Number(page.ocrAttempt || 0) + 1,
+                    ocrStartedAt: page.ocrStartedAt || now,
+                    ocrCompletedAt: now
+                });
+            }
+
+            const pages = await queryItems(CONTAINER_PAGES, {
+                query: 'SELECT * FROM c WHERE c.referenceId = @referenceId ORDER BY c.pdfPageNumber',
+                parameters: [{ name: '@referenceId', value: referenceId }]
+            });
+            const summary = summarizeOcrPages(pages);
+            const currentPage = page.pageNumber || page.pdfPageNumber || summary.pagesCompleted;
+            let newStatus = reference.ref_knowledge_status || 1;
+            let status = 'processing';
+
+            if (summary.pagesCompleted >= summary.totalPages) {
+                const completion = await finalizeBrowserOcrJob(reference, job, summary);
+                newStatus = completion.newStatus;
+                status = completion.finalStatus;
+            } else {
+                await upsertItem(CONTAINER_JOBS, {
+                    ...job,
+                    ...summary,
+                    status: 'processing',
+                    currentPage,
+                    lastUpdated: now,
+                    ttl: JOB_TTL_SECONDS
+                });
+            }
+
+            return jsonResponse(200, {
+                success: true,
+                jobId,
+                referenceId,
+                currentPage,
+                ...summary,
+                status,
+                newStatus
+            });
+        } catch (error) {
+            context.error('[KB Local OCR Result] Error:', error);
+            return jsonResponse(500, { error: 'Failed to save local OCR result', details: error.message });
         }
     }
 });

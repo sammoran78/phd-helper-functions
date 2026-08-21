@@ -14,7 +14,6 @@ const BLOB_CONTAINER_UPLOADS = process.env.BLOB_CONTAINER_UPLOADS || 'uploads';
 const BLOB_CONTAINER_PAGES = process.env.BLOB_CONTAINER_PAGES || 'pages';
 const BIBLIOGRAPHY_FILTER_CLAUSE = 'c.ref_knowledge_status >= 3 AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)';
 const BIBLIOGRAPHY_EXPORT_QUERY = `SELECT c.id, c.authors, c.author, c.year, c.title, c.apa7, c.journal, c.source, c.publisher, c.doi, c.url, c.link FROM c WHERE ${BIBLIOGRAPHY_FILTER_CLAUSE}`;
-const DOCX_EXPORT_MAX_ITEMS = Number(process.env.BIBLIOGRAPHY_DOCX_MAX_ITEMS || 400);
 const JOB_TTL_SECONDS = 7200;
 
 let openaiClient = null;
@@ -354,7 +353,15 @@ const processDeleteReferenceJob = async (jobRecord, context) => {
             parameters: [{ name: '@referenceId', value: reference.id }]
         });
         const pageList = Array.isArray(pages) ? pages : [];
-        const files = Array.isArray(reference.files) ? reference.files : [];
+        const files = Array.isArray(reference.files) ? [...reference.files] : [];
+        if (reference?.podcast?.blobName || reference?.podcast?.url) {
+            files.push({
+                name: reference.podcast.fileName || 'audio-overview.mp3',
+                blobName: reference.podcast.blobName,
+                url: reference.podcast.url,
+                contentType: reference.podcast.contentType || 'audio/mpeg'
+            });
+        }
         const openai = getOpenAiClient();
         const { doiKey, titleKey } = getReferenceKeys(reference);
 
@@ -1008,7 +1015,7 @@ const sanitizePdfText = (text) => (text || '')
     .replace(/[^\x20-\x7E\xA0-\xFF]/g, '');
 
 const buildExportCitationText = (reference, options = {}) => {
-    const maxChars = Number(options.maxChars || 1800);
+    const maxChars = options.maxChars === undefined ? 1800 : Number(options.maxChars);
     const useHtmlStrip = !!options.useHtmlStrip;
     const useMarkdownStrip = !!options.useMarkdownStrip;
 
@@ -1020,7 +1027,7 @@ const buildExportCitationText = (reference, options = {}) => {
     if (useMarkdownStrip) text = stripApaFormatting(text);
 
     text = (text || '').toString().replace(/\s+/g, ' ').trim();
-    if (text.length > maxChars) {
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
         text = `${text.slice(0, maxChars)}…`;
     }
     return text;
@@ -1200,6 +1207,34 @@ const formatBibtexEntry = (reference, metadata = {}) => {
     return `@${entryType}{${key},\n${fields.join(',\n')}\n}`;
 };
 
+const createBibliographyDocxBuffer = async (references = []) => {
+    const sorted = sortBibliographyReferences(references);
+    const paragraphs = sorted.map(ref => {
+        const text = sanitizeDocxText(buildExportCitationText(ref, { maxChars: 0 }));
+
+        return new Paragraph({
+            children: parseSimpleMarkdownRuns(text),
+            indent: { left: 720, hanging: 720 },
+            spacing: { after: 240 }
+        });
+    });
+
+    const doc = new Document({
+        sections: [
+            {
+                properties: {},
+                children: paragraphs.length > 0 ? paragraphs : [
+                    new Paragraph({
+                        children: [new TextRun({ text: 'No bibliography entries.', font: 'Times New Roman', size: 22 })]
+                    })
+                ]
+            }
+        ]
+    });
+
+    return Packer.toBuffer(doc);
+};
+
 // GET /api/references/bibliography/export-docx - Export bibliography list as DOCX
 app.http('ExportBibliographyDocx', {
     methods: ['GET'],
@@ -1212,47 +1247,7 @@ app.http('ExportBibliographyDocx', {
             const references = await queryItems(CONTAINER_NAME, {
                 query: BIBLIOGRAPHY_EXPORT_QUERY
             });
-
-            const sorted = sortBibliographyReferences(references);
-            const limited = sorted.slice(0, DOCX_EXPORT_MAX_ITEMS);
-            const wasTruncated = sorted.length > limited.length;
-
-            const paragraphs = limited.map(ref => {
-                const text = sanitizeDocxText(buildExportCitationText(ref, { maxChars: 1000 }));
-
-                return new Paragraph({
-                    children: parseSimpleMarkdownRuns(text),
-                    indent: { left: 720, hanging: 720 },
-                    spacing: { after: 240 }
-                });
-            });
-
-            if (wasTruncated) {
-                paragraphs.push(new Paragraph({
-                    children: [new TextRun({
-                        text: `Export truncated to first ${limited.length} entries to avoid timeout.`,
-                        font: 'Times New Roman',
-                        size: 20,
-                        italics: true
-                    })],
-                    spacing: { before: 240 }
-                }));
-            }
-
-            const doc = new Document({
-                sections: [
-                    {
-                        properties: {},
-                        children: paragraphs.length > 0 ? paragraphs : [
-                            new Paragraph({
-                                children: [new TextRun({ text: 'No bibliography entries.', font: 'Times New Roman', size: 22 })]
-                            })
-                        ]
-                    }
-                ]
-            });
-
-            const buffer = await Packer.toBuffer(doc);
+            const buffer = await createBibliographyDocxBuffer(references);
             const fileName = `bibliography_${new Date().toISOString().slice(0, 10)}.docx`;
 
             return {
@@ -1320,3 +1315,9 @@ app.http('DeleteReference', {
         }
     }
 });
+
+module.exports = {
+    __test: {
+        createBibliographyDocxBuffer
+    }
+};
