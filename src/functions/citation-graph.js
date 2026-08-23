@@ -6,6 +6,7 @@ const { getThesisFraming } = require('../../shared/thesisFraming');
 const {
     SCAN_VERSION,
     aggregateCitationGraph,
+    resolveCitationReviewProposal,
     scanReferenceCitations
 } = require('../../shared/citationGraph');
 
@@ -15,9 +16,47 @@ const ANALYTICS_CONTAINER = process.env.COSMOSDB_CONTAINER_ANALYTICS || 'analyti
 const SCAN_TYPE = 'corpus_citation_scan';
 const REVIEW_TYPE = 'corpus_citation_review';
 
+const boundedString = (value, maximumLength) => typeof value === 'string'
+    ? value.trim().slice(0, maximumLength)
+    : null;
+
+const sanitizeSubmittedProposal = (proposal) => {
+    if (!proposal || typeof proposal !== 'object') return null;
+    const confidence = Number(proposal.confidence);
+    const citation = proposal.citation && typeof proposal.citation === 'object'
+        ? {
+            canonicalKey: boundedString(proposal.citation.canonicalKey, 500),
+            doi: boundedString(proposal.citation.doi, 200),
+            year: Number(proposal.citation.year) || null,
+            authors: boundedString(proposal.citation.authors, 500),
+            authorSurname: boundedString(proposal.citation.authorSurname, 200),
+            title: boundedString(proposal.citation.title, 1000),
+            displayCitation: boundedString(proposal.citation.displayCitation, 2000),
+            pageNumber: Number(proposal.citation.pageNumber) || null,
+            evidence: boundedString(proposal.citation.evidence, 2500)
+        }
+        : null;
+    const evidence = Array.isArray(proposal.evidence)
+        ? proposal.evidence.slice(0, 5).map(item => ({
+            pageNumber: Number(item?.pageNumber) || null,
+            excerpt: boundedString(item?.excerpt, 2500),
+            section: boundedString(item?.section, 100)
+        }))
+        : [];
+    return {
+        confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null,
+        reason: boundedString(proposal.reason, 200),
+        citation,
+        evidence
+    };
+};
+
 const json = (status, payload) => ({
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store, no-cache, must-revalidate'
+    },
     body: JSON.stringify(payload)
 });
 
@@ -174,15 +213,31 @@ app.http('ReviewCorpusCitationMatch', {
                 getCitationScans(),
                 getCitationReviews()
             ]);
-            const graph = aggregateCitationGraph(references, getCurrentCitationScans(references, scans), reviews);
-            const match = graph.ambiguousMatches.find(item => (
-                item.sourceReferenceId === sourceReferenceId
-                && item.candidateKey === candidateKey
-                && item.targetReferenceId === targetReferenceId
-            ));
-            if (!match) return json(404, { error: 'Ambiguous citation match was not found' });
+            const referencesById = new Map(references.map(reference => [reference.id, reference]));
+            if (!referencesById.has(sourceReferenceId) || !referencesById.has(targetReferenceId)) {
+                return json(404, { error: 'The source or target bibliography work was not found' });
+            }
+            if (sourceReferenceId === targetReferenceId) {
+                return json(400, { error: 'A bibliography work cannot cite itself' });
+            }
+            const currentScans = getCurrentCitationScans(references, scans);
+            const graph = aggregateCitationGraph(references, currentScans, reviews);
+            const {
+                proposal: match,
+                proposalStateAtReview,
+                existingReview
+            } = resolveCitationReviewProposal({
+                sourceReferenceId,
+                targetReferenceId,
+                candidateKey,
+                graph,
+                scans: currentScans,
+                reviews,
+                submittedProposal: sanitizeSubmittedProposal(body?.proposal)
+            });
 
             const now = new Date().toISOString();
+            const confidenceBeforeReview = Number(match.confidence ?? match.confidenceBeforeReview);
             const digest = crypto.createHash('sha256')
                 .update(`${sourceReferenceId}|${candidateKey}|${targetReferenceId}`)
                 .digest('hex')
@@ -194,14 +249,31 @@ app.http('ReviewCorpusCitationMatch', {
                 targetReferenceId,
                 candidateKey,
                 decision,
-                confidenceBeforeReview: match.confidence,
-                reason: match.reason,
-                citation: match.citation,
-                evidence: match.evidence,
+                confidenceBeforeReview: Number.isFinite(confidenceBeforeReview) ? confidenceBeforeReview : null,
+                reason: match.reason || existingReview?.reason || null,
+                citation: match.citation || existingReview?.citation || null,
+                evidence: Array.isArray(match.evidence) ? match.evidence : (existingReview?.evidence || []),
+                proposalStateAtReview,
+                createdAt: existingReview?.createdAt || existingReview?.reviewedAt || now,
                 reviewedAt: now,
                 updatedAt: now
             });
-            return json(200, review);
+            const updatedReviews = reviews.filter(item => !(
+                item.sourceReferenceId === sourceReferenceId
+                && item.targetReferenceId === targetReferenceId
+                && item.candidateKey === candidateKey
+            ));
+            updatedReviews.push(review);
+            const updatedGraph = aggregateCitationGraph(
+                references,
+                currentScans,
+                updatedReviews
+            );
+            return json(200, {
+                review,
+                graph: updatedGraph,
+                acceptedStaleProposal: !['pending', 'scan_present'].includes(proposalStateAtReview)
+            });
         } catch (error) {
             context.error('[Corpus Graph] Review failed:', error);
             return json(500, { error: 'Failed to save citation review', details: error.message });

@@ -431,6 +431,46 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
     };
 };
 
+const resolveCitationReviewProposal = ({
+    sourceReferenceId,
+    targetReferenceId,
+    candidateKey,
+    graph,
+    scans = [],
+    reviews = [],
+    submittedProposal = null
+}) => {
+    const isSameProposal = item => item
+        && item.sourceReferenceId === sourceReferenceId
+        && item.targetReferenceId === targetReferenceId
+        && item.candidateKey === candidateKey;
+    const pendingProposal = (graph?.ambiguousMatches || []).find(isSameProposal);
+    const existingReview = reviews.find(isSameProposal);
+    const scannedProposal = scans
+        .flatMap(scan => scan?.ambiguousMatches || [])
+        .find(isSameProposal);
+    const submitted = submittedProposal && typeof submittedProposal === 'object'
+        ? {
+            ...submittedProposal,
+            sourceReferenceId,
+            targetReferenceId,
+            candidateKey
+        }
+        : null;
+    const proposal = pendingProposal || existingReview || scannedProposal || submitted || {
+        sourceReferenceId,
+        targetReferenceId,
+        candidateKey
+    };
+    const proposalStateAtReview = pendingProposal
+        ? 'pending'
+        : (existingReview
+            ? 'existing_review'
+            : (scannedProposal ? 'scan_present' : (submitted ? 'stale_snapshot' : 'minimal_stale')));
+
+    return { proposal, proposalStateAtReview, existingReview };
+};
+
 module.exports = {
     SCAN_VERSION,
     aggregateCitationGraph,
@@ -442,6 +482,7 @@ module.exports = {
     normalizeTitle,
     parseReferenceEntry,
     resolveCandidate,
+    resolveCitationReviewProposal,
     scanReferenceCitations,
     sourceYear
 };

@@ -5,6 +5,7 @@ const {
     aggregateCitationGraph,
     extractReferenceEntries,
     normalizeDoi,
+    resolveCitationReviewProposal,
     scanReferenceCitations
 } = require('../shared/citationGraph');
 
@@ -195,4 +196,46 @@ test('human rejection removes only that proposed match and retains the overlooke
     assert.equal(graph.ambiguousMatches.length, 0);
     assert.equal(graph.edges.length, 0);
     assert.equal(graph.missingWorks[0].title, 'Still overlooked');
+});
+
+test('resolves the exact stale proposal submitted by the review card', () => {
+    const resolved = resolveCitationReviewProposal({
+        sourceReferenceId: 'source-a',
+        targetReferenceId: 'target-b',
+        candidateKey: 'stale-candidate',
+        graph: { ambiguousMatches: [] },
+        scans: [],
+        reviews: [],
+        submittedProposal: {
+            confidence: 0.73,
+            reason: 'doi',
+            citation: { displayCitation: 'Jones, B. (2020). Creative Agency.' }
+        }
+    });
+    assert.equal(resolved.proposalStateAtReview, 'stale_snapshot');
+    assert.equal(resolved.proposal.sourceReferenceId, 'source-a');
+    assert.equal(resolved.proposal.targetReferenceId, 'target-b');
+    assert.equal(resolved.proposal.candidateKey, 'stale-candidate');
+    assert.equal(resolved.proposal.confidence, 0.73);
+});
+
+test('resolves a repeated review idempotently after the proposal leaves the queue', () => {
+    const existingReview = {
+        sourceReferenceId: 'source-a',
+        targetReferenceId: 'target-b',
+        candidateKey: 'already-reviewed',
+        decision: 'confirmed',
+        citation: { displayCitation: 'Jones, B. (2020). Creative Agency.' }
+    };
+    const resolved = resolveCitationReviewProposal({
+        sourceReferenceId: 'source-a',
+        targetReferenceId: 'target-b',
+        candidateKey: 'already-reviewed',
+        graph: { ambiguousMatches: [] },
+        scans: [],
+        reviews: [existingReview]
+    });
+    assert.equal(resolved.proposalStateAtReview, 'existing_review');
+    assert.equal(resolved.proposal, existingReview);
+    assert.equal(resolved.existingReview, existingReview);
 });
