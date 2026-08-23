@@ -116,12 +116,14 @@ app.http('GetCorpusCitationGraph', {
             ]);
             const graph = aggregateCitationGraph(references, scans, reviews);
             const scansBySource = new Map(scans.map(scan => [scan.sourceReferenceId, scan]));
-            const scanned = references.filter(reference => {
+            const scannedReferenceIds = references.filter(reference => {
                 const scan = scansBySource.get(reference.id);
                 return scan?.scanVersion === SCAN_VERSION && scan?.sourceFingerprint === referenceFingerprint(reference);
-            }).length;
+            }).map(reference => reference.id);
+            const scanned = scannedReferenceIds.length;
             return json(200, {
                 ...graph,
+                scannedReferenceIds,
                 missingWorkCount: graph.missingWorks.length,
                 missingWorks: graph.missingWorks.slice(0, 200),
                 progress: {
