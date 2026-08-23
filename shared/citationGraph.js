@@ -1,4 +1,4 @@
-const SCAN_VERSION = 3;
+const SCAN_VERSION = 4;
 
 const normalizeDoi = (value = '') => {
     const text = value.toString().trim().toLowerCase()
@@ -33,6 +33,31 @@ const firstAuthorSurname = (reference = {}) => {
     if (first.includes(',')) return normalizeTitle(first.split(',')[0]);
     const parts = first.split(/\s+/).filter(Boolean);
     return normalizeTitle(parts[parts.length - 1] || '');
+};
+
+const authorSurnames = (reference = {}) => {
+    const value = reference.authors || reference.author || '';
+    const raw = (Array.isArray(value) ? value.join('; ') : value).toString().trim();
+    if (!raw) return [];
+    const surnames = new Set();
+    for (const match of raw.matchAll(/([A-ZÀ-ÖØ-Þ][\p{L}'’\-]{2,}),\s*(?=[A-ZÀ-ÖØ-Þ])/gu)) {
+        surnames.add(normalizeTitle(match[1]));
+    }
+    raw.split(/\s+&\s+|;|\band\b/iu).forEach(part => {
+        const compact = part.trim();
+        if (!compact || compact.includes(',')) return;
+        const words = compact.match(/[\p{L}'’\-]+/gu) || [];
+        const surname = normalizeTitle(words.at(-1) || '');
+        if (surname.length >= 3) surnames.add(surname);
+    });
+    return [...surnames];
+};
+
+const candidateContainsCorpusAuthor = (candidate, reference) => {
+    const extractedAuthors = normalizeTitle(candidate?.authors || '');
+    if (!extractedAuthors) return false;
+    const extractedTokens = new Set(extractedAuthors.split(' ').filter(Boolean));
+    return authorSurnames(reference).some(surname => extractedTokens.has(surname));
 };
 
 const buildCorpusIndex = (references = []) => {
@@ -156,27 +181,40 @@ const titleTokenSimilarity = (left, right) => {
 
 const resolveCandidate = (candidate, index) => {
     if (candidate.doi && index.byDoi.has(candidate.doi)) {
-        return { reference: index.byDoi.get(candidate.doi), matchType: 'doi', confidence: 1 };
+        const reference = index.byDoi.get(candidate.doi);
+        if (candidateContainsCorpusAuthor(candidate, reference)) {
+            return { reference, matchType: 'doi', confidence: 1 };
+        }
     }
     const normalizedCandidateTitle = normalizeTitle(candidate.title);
     if (normalizedCandidateTitle.length >= 18 && index.byTitle.has(normalizedCandidateTitle)) {
-        return { reference: index.byTitle.get(normalizedCandidateTitle), matchType: 'title', confidence: 0.96 };
+        const reference = index.byTitle.get(normalizedCandidateTitle);
+        if (candidateContainsCorpusAuthor(candidate, reference)) {
+            return { reference, matchType: 'title', confidence: 0.96 };
+        }
     }
     if (normalizedCandidateTitle.length >= 24) {
         const fuzzy = index.references.find(reference => {
             const target = normalizeTitle(reference.title);
             const similarity = titleTokenSimilarity(target, normalizedCandidateTitle);
-            return target.length >= 24
+            return candidateContainsCorpusAuthor(candidate, reference)
+                && target.length >= 24
                 && (target.includes(normalizedCandidateTitle)
                     || normalizedCandidateTitle.includes(target)
                     || (similarity.shared >= 3 && similarity.minimumCoverage >= 0.82 && similarity.jaccard >= 0.55));
         });
-        if (fuzzy) return { reference: fuzzy, matchType: 'title_fuzzy', confidence: 0.88 };
+        if (fuzzy) {
+            return { reference: fuzzy, matchType: 'title_fuzzy', confidence: 0.88 };
+        }
     }
     if (candidate.authorSurname && candidate.year) {
         const matches = index.byAuthorYear.get(`${candidate.authorSurname}|${candidate.year}`) || [];
         const similarity = matches.length === 1 ? titleTokenSimilarity(matches[0].title, candidate.title) : null;
-        if (matches.length === 1 && similarity.shared >= 2 && similarity.minimumCoverage >= 0.65 && similarity.jaccard >= 0.45) {
+        if (matches.length === 1
+            && candidateContainsCorpusAuthor(candidate, matches[0])
+            && similarity.shared >= 2
+            && similarity.minimumCoverage >= 0.65
+            && similarity.jaccard >= 0.45) {
             return { reference: matches[0], matchType: 'author_year_title', confidence: 0.78 };
         }
     }
@@ -186,7 +224,7 @@ const resolveCandidate = (candidate, index) => {
 const findAmbiguousMatches = (candidate, index) => {
     const suggestions = new Map();
     const add = (reference, confidence, reason) => {
-        if (!reference?.id) return;
+        if (!reference?.id || !candidateContainsCorpusAuthor(candidate, reference)) return;
         const previous = suggestions.get(reference.id);
         if (!previous || confidence > previous.confidence) {
             suggestions.set(reference.id, { reference, confidence: Number(confidence.toFixed(2)), reason });
@@ -224,34 +262,15 @@ const findAmbiguousMatches = (candidate, index) => {
 const scanReferenceCitations = (sourceReference, pages, corpusReferences) => {
     const index = buildCorpusIndex(corpusReferences);
     const candidates = extractReferenceEntries(pages);
-    const edgeMap = new Map();
     const missingMap = new Map();
     const ambiguousMap = new Map();
 
     candidates.forEach(candidate => {
         const resolved = resolveCandidate(candidate, index);
-        if (resolved && resolved.reference.id !== sourceReference.id) {
-            const previous = edgeMap.get(resolved.reference.id);
-            const evidence = {
-                pageNumber: candidate.pageNumber,
-                excerpt: candidate.evidence,
-                section: 'bibliography'
-            };
-            if (!previous || resolved.confidence > previous.confidence) {
-                edgeMap.set(resolved.reference.id, {
-                    sourceReferenceId: sourceReference.id,
-                    targetReferenceId: resolved.reference.id,
-                    matchType: resolved.matchType,
-                    confidence: resolved.confidence,
-                    evidence: [evidence]
-                });
-            } else if (previous.evidence.length < 3) {
-                previous.evidence.push(evidence);
-            }
-            return;
-        }
-
-        findAmbiguousMatches(candidate, index).forEach(suggestion => {
+        const suggestions = resolved
+            ? [{ reference: resolved.reference, confidence: resolved.confidence, reason: resolved.matchType }]
+            : findAmbiguousMatches(candidate, index);
+        suggestions.forEach(suggestion => {
             if (suggestion.reference.id === sourceReference.id) return;
             const key = `${candidate.canonicalKey}->${suggestion.reference.id}`;
             ambiguousMap.set(key, {
@@ -282,7 +301,7 @@ const scanReferenceCitations = (sourceReference, pages, corpusReferences) => {
     });
 
     return {
-        edges: [...edgeMap.values()],
+        edges: [],
         ambiguousMatches: [...ambiguousMap.values()].slice(0, 300),
         missingWorks: [...missingMap.values()].slice(0, 400),
         candidateCount: candidates.length
@@ -296,10 +315,8 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
     const referenceIds = new Set(references.map(reference => reference.id));
     const reviewKey = item => `${item.sourceReferenceId}|${item.candidateKey}|${item.targetReferenceId}`;
     const reviewsByKey = new Map(reviews.map(review => [reviewKey(review), review]));
-    const confirmedCandidateKeys = new Set(reviews
-        .filter(review => review.decision === 'confirmed')
-        .map(review => `${review.sourceReferenceId}|${review.candidateKey}`));
-    const ambiguousMatches = [];
+    const ambiguousMap = new Map();
+    const candidateStates = new Map();
 
     const addEdge = edge => {
         if (!referenceIds.has(edge.sourceReferenceId) || !referenceIds.has(edge.targetReferenceId) || edge.sourceReferenceId === edge.targetReferenceId) return;
@@ -308,36 +325,57 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
         if (!previous || Number(edge.confidence || 0) > Number(previous.confidence || 0)) edgeMap.set(key, edge);
     };
 
+    const applyProposedMatch = match => {
+        if (!referenceIds.has(match.sourceReferenceId)
+            || !referenceIds.has(match.targetReferenceId)
+            || match.sourceReferenceId === match.targetReferenceId) return;
+        const stateKey = `${match.sourceReferenceId}|${match.candidateKey}`;
+        const state = candidateStates.get(stateKey) || { confirmed: false, pending: false, rejected: false };
+        const review = reviewsByKey.get(reviewKey(match));
+        if (review?.decision === 'confirmed') {
+            state.confirmed = true;
+            addEdge({
+                sourceReferenceId: match.sourceReferenceId,
+                targetReferenceId: match.targetReferenceId,
+                matchType: 'human_verified',
+                confidence: 1,
+                evidence: match.evidence || [],
+                reviewedAt: review.reviewedAt
+            });
+        } else if (review?.decision === 'rejected') {
+            state.rejected = true;
+        } else {
+            state.pending = true;
+            ambiguousMap.set(reviewKey(match), match);
+        }
+        candidateStates.set(stateKey, state);
+    };
+
     scans.forEach(scan => {
-        (scan.edges || []).forEach(addEdge);
-        (scan.ambiguousMatches || []).forEach(match => {
-            const review = reviewsByKey.get(reviewKey(match));
-            if (review?.decision === 'confirmed') {
-                addEdge({
-                    sourceReferenceId: match.sourceReferenceId,
-                    targetReferenceId: match.targetReferenceId,
-                    matchType: 'human_verified',
-                    confidence: 1,
-                    evidence: match.evidence || [],
-                    reviewedAt: review.reviewedAt
-                });
-            } else if (!review && referenceIds.has(match.sourceReferenceId) && referenceIds.has(match.targetReferenceId)) {
-                ambiguousMatches.push(match);
-            }
-        });
+        (scan.ambiguousMatches || []).forEach(applyProposedMatch);
         (scan.missingWorks || []).forEach(candidate => {
-            if (confirmedCandidateKeys.has(`${scan.sourceReferenceId}|${candidate.canonicalKey}`)) return;
-            const resolved = resolveCandidate(candidate, index);
-            if (resolved && resolved.reference.id !== scan.sourceReferenceId) {
-                addEdge({
-                    sourceReferenceId: scan.sourceReferenceId,
-                    targetReferenceId: resolved.reference.id,
-                    matchType: `reconciled_${resolved.matchType}`,
-                    confidence: resolved.confidence,
-                    evidence: candidate.evidence ? [{ pageNumber: candidate.pageNumber, excerpt: candidate.evidence, section: 'bibliography' }] : []
-                });
-                return;
+            const stateKey = `${scan.sourceReferenceId}|${candidate.canonicalKey}`;
+            let state = candidateStates.get(stateKey);
+            if (!state) {
+                const resolved = resolveCandidate(candidate, index);
+                if (resolved && resolved.reference.id !== scan.sourceReferenceId) {
+                    applyProposedMatch({
+                        sourceReferenceId: scan.sourceReferenceId,
+                        targetReferenceId: resolved.reference.id,
+                        candidateKey: candidate.canonicalKey,
+                        confidence: resolved.confidence,
+                        reason: `reconciled_${resolved.matchType}`,
+                        citation: candidate,
+                        evidence: candidate.evidence ? [{
+                            pageNumber: candidate.pageNumber,
+                            excerpt: candidate.evidence,
+                            section: 'bibliography'
+                        }] : []
+                    });
+                    state = candidateStates.get(stateKey);
+                }
             }
+            if (state?.confirmed || state?.pending) return;
             const key = candidate.canonicalKey;
             if (!key) return;
             const aggregate = missingMap.get(key) || {
@@ -354,7 +392,11 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
             if (!aggregate.citedBySourceIds.includes(scan.sourceReferenceId)) aggregate.citedBySourceIds.push(scan.sourceReferenceId);
             aggregate.occurrenceCount += Number(candidate.occurrenceCount || 1);
             if (candidate.evidence && aggregate.evidence.length < 3) {
-                aggregate.evidence.push({ sourceReferenceId: scan.sourceReferenceId, pageNumber: candidate.pageNumber, excerpt: candidate.evidence });
+                aggregate.evidence.push({
+                    sourceReferenceId: scan.sourceReferenceId,
+                    pageNumber: candidate.pageNumber,
+                    excerpt: candidate.evidence
+                });
             }
             missingMap.set(key, aggregate);
         });
@@ -384,7 +426,7 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
         edges,
         missingWorks: [...missingMap.values()]
             .sort((a, b) => b.citedBySourceIds.length - a.citedBySourceIds.length || b.occurrenceCount - a.occurrenceCount),
-        ambiguousMatches: ambiguousMatches.sort((a, b) => b.confidence - a.confidence),
+        ambiguousMatches: [...ambiguousMap.values()].sort((a, b) => b.confidence - a.confidence),
         scanVersion: SCAN_VERSION
     };
 };

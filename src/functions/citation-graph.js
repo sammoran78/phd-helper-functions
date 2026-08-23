@@ -46,6 +46,16 @@ const referenceFingerprint = (reference) => crypto.createHash('sha256').update(J
     pages: reference.kb_total_pages
 })).digest('hex').slice(0, 20);
 
+const getCurrentCitationScans = (references, scans) => {
+    const referencesById = new Map(references.map(reference => [reference.id, reference]));
+    return scans.filter(scan => {
+        const reference = referencesById.get(scan.sourceReferenceId);
+        return reference
+            && scan.scanVersion === SCAN_VERSION
+            && scan.sourceFingerprint === referenceFingerprint(reference);
+    });
+};
+
 const scanOneReference = async (reference, references, previousScan, context) => {
     const pages = await queryItems(PAGES_CONTAINER, {
         query: 'SELECT c.id, c.referenceId, c.pageNumber, c.pdfPageNumber, c.ocrText FROM c WHERE c.referenceId = @referenceId AND IS_STRING(c.ocrText)',
@@ -114,13 +124,7 @@ app.http('GetCorpusCitationGraph', {
                 getCitationReviews(),
                 getThesisFraming().catch(() => null)
             ]);
-            const referencesById = new Map(references.map(reference => [reference.id, reference]));
-            const currentScans = scans.filter(scan => {
-                const reference = referencesById.get(scan.sourceReferenceId);
-                return reference
-                    && scan.scanVersion === SCAN_VERSION
-                    && scan.sourceFingerprint === referenceFingerprint(reference);
-            });
+            const currentScans = getCurrentCitationScans(references, scans);
             const graph = aggregateCitationGraph(references, currentScans, reviews);
             const scansBySource = new Map(scans.map(scan => [scan.sourceReferenceId, scan]));
             const scannedReferenceIds = references.filter(reference => {
@@ -165,10 +169,16 @@ app.http('ReviewCorpusCitationMatch', {
             if (!sourceReferenceId || !targetReferenceId || !candidateKey || !decision) {
                 return json(400, { error: 'sourceReferenceId, targetReferenceId, candidateKey, and a confirmed/rejected decision are required' });
             }
-            const scans = await getCitationScans();
-            const scan = scans.find(item => item.sourceReferenceId === sourceReferenceId);
-            const match = (scan?.ambiguousMatches || []).find(item => (
-                item.candidateKey === candidateKey && item.targetReferenceId === targetReferenceId
+            const [references, scans, reviews] = await Promise.all([
+                getBibliographyReferences(),
+                getCitationScans(),
+                getCitationReviews()
+            ]);
+            const graph = aggregateCitationGraph(references, getCurrentCitationScans(references, scans), reviews);
+            const match = graph.ambiguousMatches.find(item => (
+                item.sourceReferenceId === sourceReferenceId
+                && item.candidateKey === candidateKey
+                && item.targetReferenceId === targetReferenceId
             ));
             if (!match) return json(404, { error: 'Ambiguous citation match was not found' });
 

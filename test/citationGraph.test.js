@@ -66,34 +66,57 @@ test('separates Harvard-style references and rejects the unrelated Beyond Justic
     assert.equal(result.edges.length, 0);
 });
 
-test('creates a directed corpus edge and retains overlooked works with evidence', () => {
+test('queues even an exact DOI match for human confirmation', () => {
     const result = scanReferenceCitations(references[0], pages, references);
-    assert.deepEqual(result.edges.map(edge => [edge.sourceReferenceId, edge.targetReferenceId]), [['source-a', 'target-b']]);
-    assert.equal(result.edges[0].matchType, 'doi');
-    assert.match(result.edges[0].evidence[0].excerpt, /Creative Agency/);
-    assert.equal(result.missingWorks.length, 1);
-    assert.equal(result.missingWorks[0].title, 'Overlooked Creative Labour');
+    assert.equal(result.edges.length, 0);
+    assert.equal(result.ambiguousMatches.length, 1);
+    assert.equal(result.ambiguousMatches[0].targetReferenceId, 'target-b');
+    assert.equal(result.ambiguousMatches[0].reason, 'doi');
+    assert.match(result.ambiguousMatches[0].evidence[0].excerpt, /Creative Agency/);
 });
 
-test('aggregates inbound/outbound degree and shared missing citations', () => {
+test('requires a corpus author surname even when the DOI and title match', () => {
+    const wrongAuthorPages = [{
+        pageNumber: 4,
+        ocrText: 'References\nWrong, Z. (2020). Creative Agency and Artificial Intelligence. https://doi.org/10.1234/agency.2020'
+    }];
+    const result = scanReferenceCitations(references[0], wrongAuthorPages, references);
+    assert.equal(result.edges.length, 0);
+    assert.equal(result.ambiguousMatches.length, 0);
+    assert.equal(result.missingWorks.length, 1);
+});
+
+test('aggregates only human-confirmed edges and shared missing citations', () => {
+    const match = {
+        sourceReferenceId: 'source-a',
+        targetReferenceId: 'target-b',
+        candidateKey: 'doi:10.1234/agency.2020',
+        confidence: 1,
+        reason: 'doi'
+    };
     const scanA = {
         sourceReferenceId: 'source-a',
-        edges: [{ sourceReferenceId: 'source-a', targetReferenceId: 'target-b', confidence: 1, matchType: 'doi' }],
-        missingWorks: [{ canonicalKey: 'brown|2019|overlooked creative labour', title: 'Overlooked Creative Labour', authors: 'Brown, C.', year: 2019, occurrenceCount: 1 }]
+        edges: [],
+        ambiguousMatches: [match],
+        missingWorks: [
+            { canonicalKey: 'doi:10.1234/agency.2020', doi: '10.1234/agency.2020', title: 'Creative Agency and Artificial Intelligence', authors: 'Jones, B.', year: 2020, occurrenceCount: 1 },
+            { canonicalKey: 'brown|2019|overlooked creative labour', title: 'Overlooked Creative Labour', authors: 'Brown, C.', year: 2019, occurrenceCount: 1 }
+        ]
     };
     const scanC = {
         sourceReferenceId: 'source-c',
         edges: [],
         missingWorks: [{ canonicalKey: 'brown|2019|overlooked creative labour', title: 'Overlooked Creative Labour', authors: 'Brown, C.', year: 2019, occurrenceCount: 1 }]
     };
-    const graph = aggregateCitationGraph(references, [scanA, scanC]);
+    const graph = aggregateCitationGraph(references, [scanA, scanC], [{ ...match, decision: 'confirmed', reviewedAt: '2026-08-23T00:00:00Z' }]);
     assert.equal(graph.edges.length, 1);
+    assert.equal(graph.edges[0].matchType, 'human_verified');
     assert.equal(graph.nodes.find(node => node.id === 'source-a').outbound, 1);
     assert.equal(graph.nodes.find(node => node.id === 'target-b').inbound, 1);
     assert.deepEqual(graph.missingWorks[0].citedBySourceIds.sort(), ['source-a', 'source-c']);
 });
 
-test('reconciles a formerly missing work when it is later added to the corpus', () => {
+test('queues a formerly missing work for review when it is later added to the corpus', () => {
     const scan = {
         sourceReferenceId: 'source-a',
         edges: [],
@@ -101,13 +124,17 @@ test('reconciles a formerly missing work when it is later added to the corpus', 
             canonicalKey: 'doi:10.1234/agency.2020',
             doi: '10.1234/agency.2020',
             title: 'Creative Agency and Artificial Intelligence',
+            authors: 'Jones, B.',
+            year: 2020,
             occurrenceCount: 1
         }]
     };
     const graph = aggregateCitationGraph(references, [scan]);
     assert.equal(graph.missingWorks.length, 0);
-    assert.equal(graph.edges[0].targetReferenceId, 'target-b');
-    assert.match(graph.edges[0].matchType, /^reconciled_/);
+    assert.equal(graph.edges.length, 0);
+    assert.equal(graph.ambiguousMatches.length, 1);
+    assert.equal(graph.ambiguousMatches[0].targetReferenceId, 'target-b');
+    assert.equal(graph.ambiguousMatches[0].reason, 'reconciled_doi');
 });
 
 test('queues plausible author-year/title matches for human review', () => {
