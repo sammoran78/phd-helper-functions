@@ -74,6 +74,39 @@ const getCitationReviews = () => queryItems(ANALYTICS_CONTAINER, {
     parameters: [{ name: '@type', value: REVIEW_TYPE }]
 });
 
+const getBibliographyReferencesByIds = (sourceReferenceId, targetReferenceId) => queryItems(REFERENCES_CONTAINER, {
+    query: `SELECT * FROM c
+        WHERE (c.id = @sourceReferenceId OR c.id = @targetReferenceId)
+        AND c.ref_knowledge_status >= 3
+        AND (NOT IS_DEFINED(c.dismissed) OR c.dismissed != true)`,
+    parameters: [
+        { name: '@sourceReferenceId', value: sourceReferenceId },
+        { name: '@targetReferenceId', value: targetReferenceId }
+    ]
+});
+
+const getCitationScansForSource = (sourceReferenceId) => queryItems(ANALYTICS_CONTAINER, {
+    query: 'SELECT * FROM c WHERE c.type = @type AND c.sourceReferenceId = @sourceReferenceId',
+    parameters: [
+        { name: '@type', value: SCAN_TYPE },
+        { name: '@sourceReferenceId', value: sourceReferenceId }
+    ]
+});
+
+const getCitationReviewsForProposal = (sourceReferenceId, targetReferenceId, candidateKey) => queryItems(ANALYTICS_CONTAINER, {
+    query: `SELECT * FROM c
+        WHERE c.type = @type
+        AND c.sourceReferenceId = @sourceReferenceId
+        AND c.targetReferenceId = @targetReferenceId
+        AND c.candidateKey = @candidateKey`,
+    parameters: [
+        { name: '@type', value: REVIEW_TYPE },
+        { name: '@sourceReferenceId', value: sourceReferenceId },
+        { name: '@targetReferenceId', value: targetReferenceId },
+        { name: '@candidateKey', value: candidateKey }
+    ]
+});
+
 const referenceFingerprint = (reference) => crypto.createHash('sha256').update(JSON.stringify({
     id: reference.id,
     title: reference.title,
@@ -209,9 +242,9 @@ app.http('ReviewCorpusCitationMatch', {
                 return json(400, { error: 'sourceReferenceId, targetReferenceId, candidateKey, and a confirmed/rejected decision are required' });
             }
             const [references, scans, reviews] = await Promise.all([
-                getBibliographyReferences(),
-                getCitationScans(),
-                getCitationReviews()
+                getBibliographyReferencesByIds(sourceReferenceId, targetReferenceId),
+                getCitationScansForSource(sourceReferenceId),
+                getCitationReviewsForProposal(sourceReferenceId, targetReferenceId, candidateKey)
             ]);
             const referencesById = new Map(references.map(reference => [reference.id, reference]));
             if (!referencesById.has(sourceReferenceId) || !referencesById.has(targetReferenceId)) {
@@ -221,7 +254,6 @@ app.http('ReviewCorpusCitationMatch', {
                 return json(400, { error: 'A bibliography work cannot cite itself' });
             }
             const currentScans = getCurrentCitationScans(references, scans);
-            const graph = aggregateCitationGraph(references, currentScans, reviews);
             const {
                 proposal: match,
                 proposalStateAtReview,
@@ -230,7 +262,7 @@ app.http('ReviewCorpusCitationMatch', {
                 sourceReferenceId,
                 targetReferenceId,
                 candidateKey,
-                graph,
+                graph: { ambiguousMatches: [] },
                 scans: currentScans,
                 reviews,
                 submittedProposal: sanitizeSubmittedProposal(body?.proposal)
@@ -258,20 +290,18 @@ app.http('ReviewCorpusCitationMatch', {
                 reviewedAt: now,
                 updatedAt: now
             });
-            const updatedReviews = reviews.filter(item => !(
-                item.sourceReferenceId === sourceReferenceId
-                && item.targetReferenceId === targetReferenceId
-                && item.candidateKey === candidateKey
-            ));
-            updatedReviews.push(review);
-            const updatedGraph = aggregateCitationGraph(
-                references,
-                currentScans,
-                updatedReviews
-            );
             return json(200, {
                 review,
-                graph: updatedGraph,
+                edge: decision === 'confirmed' ? {
+                    sourceReferenceId,
+                    targetReferenceId,
+                    matchType: 'human_verified',
+                    confidence: 1,
+                    evidence: review.evidence || [],
+                    reviewedAt: review.reviewedAt
+                } : null,
+                decisionScope: decision === 'confirmed' ? 'source_target_pair' : 'candidate',
+                refreshRequired: true,
                 acceptedStaleProposal: !['pending', 'scan_present'].includes(proposalStateAtReview)
             });
         } catch (error) {
