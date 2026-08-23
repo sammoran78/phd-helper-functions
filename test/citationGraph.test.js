@@ -5,6 +5,7 @@ const {
     aggregateCitationGraph,
     extractReferenceEntries,
     normalizeDoi,
+    normalizeTitle,
     resolveCitationReviewProposal,
     scanReferenceCitations
 } = require('../shared/citationGraph');
@@ -26,6 +27,27 @@ const pages = [{
 
 test('normalizes DOI URLs and trailing punctuation', () => {
     assert.equal(normalizeDoi('https://doi.org/10.1234/AGENCY.2020.'), '10.1234/agency.2020');
+});
+
+test('accepts explicit null metadata from Cosmos bibliography records', () => {
+    assert.equal(normalizeDoi(null), '');
+    assert.equal(normalizeTitle(null), '');
+    const nullableReference = {
+        id: 'nullable-reference',
+        title: null,
+        authors: null,
+        year: null,
+        doi: null,
+        url: null
+    };
+    assert.doesNotThrow(() => scanReferenceCitations(
+        references[0],
+        pages,
+        [...references, nullableReference]
+    ));
+    const graph = aggregateCitationGraph([nullableReference], [], []);
+    assert.equal(graph.nodes[0].title, 'Untitled');
+    assert.equal(graph.nodes[0].doi, null);
 });
 
 test('extracts structured candidates from an OCR bibliography', () => {

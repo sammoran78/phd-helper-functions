@@ -1,14 +1,14 @@
 const SCAN_VERSION = 4;
 
 const normalizeDoi = (value = '') => {
-    const text = value.toString().trim().toLowerCase()
+    const text = (value ?? '').toString().trim().toLowerCase()
         .replace(/^https?:\/\/(?:dx\.)?doi\.org\//, '')
         .replace(/^doi:\s*/i, '');
     const match = text.match(/10\.\d{4,9}\/[\w.()/:;+-]+/i);
     return match ? match[0].replace(/[.,;:)\]}]+$/, '').toLowerCase() : '';
 };
 
-const normalizeTitle = (value = '') => value.toString().toLowerCase()
+const normalizeTitle = (value = '') => (value ?? '').toString().toLowerCase()
     .normalize('NFKD')
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
@@ -88,7 +88,7 @@ const findReferenceStart = (pages = []) => {
 };
 
 const isEntryStart = (line = '') => {
-    const compact = line.toString().trim().replace(/^\[?\d{1,3}\]?\.?\s+/, '');
+    const compact = (line ?? '').toString().trim().replace(/^\[?\d{1,3}\]?\.?\s+/, '');
     if (!/^[A-ZÀ-ÖØ-Þ]/u.test(compact)) return false;
     const yearMatch = compact.match(/(?:18|19|20)\d{2}[a-z]?/i);
     if (!yearMatch || yearMatch.index > 180) return false;
