@@ -35,6 +35,37 @@ test('extracts structured candidates from an OCR bibliography', () => {
     assert.equal(entries[1].pageNumber, 10);
 });
 
+test('separates Harvard-style references and rejects the unrelated Beyond Justice suggestion', () => {
+    const screenshotPages = [{
+        pageNumber: 33,
+        ocrText: [
+            'References',
+            'Selvefors, A. 2017 Design beyond Interventions. Supporting Less Energy-Reliant Activities in the Everyday. Chalmers University of Technology.',
+            'Selvefors, A., Karlsson, I. C. & Rahe, U. 2015 Conflicts in everyday life: the influence of competing goals on domestic energy conservation.',
+            'Sustainability 7, 5963–5980; doi:10.3390/su7055963.',
+            'Shove, E. 2007 The Design of Everyday Life. Berg.',
+            '--- 33/34 https://doi.org/10.1017/dsj.2021.17 Published online by Cambridge University Press'
+        ].join('\n')
+    }];
+    const entries = extractReferenceEntries(screenshotPages);
+    assert.equal(entries.length, 3);
+    assert.equal(entries[0].authors, 'Selvefors, A.');
+    assert.equal(entries[1].authors, 'Selvefors, A., Karlsson, I. C. & Rahe, U.');
+    assert.equal(entries[2].authors, 'Shove, E.');
+    assert.equal(entries[2].doi, null);
+
+    const result = scanReferenceCitations(
+        { id: 'source', title: 'A meta-synthesis of activity theory', authors: 'Boks, C.', year: 2021 },
+        screenshotPages,
+        [
+            { id: 'source', title: 'A meta-synthesis of activity theory', authors: 'Boks, C.', year: 2021 },
+            { id: 'unrelated', title: 'Beyond Justice', authors: 'Viehoff, Juri', year: 2022 }
+        ]
+    );
+    assert.equal(result.ambiguousMatches.length, 0);
+    assert.equal(result.edges.length, 0);
+});
+
 test('creates a directed corpus edge and retains overlooked works with evidence', () => {
     const result = scanReferenceCitations(references[0], pages, references);
     assert.deepEqual(result.edges.map(edge => [edge.sourceReferenceId, edge.targetReferenceId]), [['source-a', 'target-b']]);

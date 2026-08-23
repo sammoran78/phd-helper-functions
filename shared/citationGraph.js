@@ -1,4 +1,4 @@
-const SCAN_VERSION = 2;
+const SCAN_VERSION = 3;
 
 const normalizeDoi = (value = '') => {
     const text = value.toString().trim().toLowerCase()
@@ -16,7 +16,10 @@ const normalizeTitle = (value = '') => value.toString().toLowerCase()
 
 const titleTokens = (value = '') => normalizeTitle(value)
     .split(' ')
-    .filter(token => token.length > 3 && !['with', 'from', 'this', 'that', 'into', 'using', 'study', 'review'].includes(token));
+    .filter(token => token.length > 3 && ![
+        'with', 'from', 'this', 'that', 'into', 'using', 'study', 'review',
+        'beyond', 'between', 'through', 'towards', 'within', 'without'
+    ].includes(token));
 
 const sourceYear = (value) => {
     const match = (value ?? '').toString().match(/(?:18|19|20)\d{2}/);
@@ -59,11 +62,25 @@ const findReferenceStart = (pages = []) => {
     return explicit >= 0 ? explicit : Math.max(0, Math.floor(sorted.length * 0.72));
 };
 
-const isEntryStart = (line = '') => /^(?:\[?\d{1,3}\]?\.?\s+)?[A-Z][^\n]{1,130}?(?:\(|,\s*)(?:18|19|20)\d{2}[a-z]?\)?(?:[.,]|\s)/.test(line);
+const isEntryStart = (line = '') => {
+    const compact = line.toString().trim().replace(/^\[?\d{1,3}\]?\.?\s+/, '');
+    if (!/^[A-ZÀ-ÖØ-Þ]/u.test(compact)) return false;
+    const yearMatch = compact.match(/(?:18|19|20)\d{2}[a-z]?/i);
+    if (!yearMatch || yearMatch.index > 180) return false;
+    const prefix = compact.slice(0, yearMatch.index).trimEnd();
+    if (/https?:\/\/|\bdoi\b/i.test(prefix)) return false;
+    return /(?:\(|[.,])\s*$/.test(prefix);
+};
 
 const parseReferenceEntry = (text, pageNumber = null) => {
-    const compact = (text || '').replace(/\s+/g, ' ').trim().replace(/^\[?\d{1,3}\]?\.?\s+/, '');
+    const compact = (text || '').replace(/\s+/g, ' ').trim()
+        .replace(/^\[?\d{1,3}\]?\.?\s+/, '')
+        .replace(/\s+[-–—]{2,}\s*\d+\s*\/\s*\d+\s+https?:\/\/.*$/i, '')
+        .replace(/\s+https?:\/\/doi\.org\/\S+\s+Published online by\b.*$/i, '');
     if (compact.length < 18) return null;
+    const withoutUrls = compact.replace(/https?:\/\/\S+|\bdoi\s*:\s*\S+/gi, ' ');
+    const distinctYears = new Set([...withoutUrls.matchAll(/(?:18|19|20)\d{2}/g)].map(match => match[0]));
+    if (distinctYears.size > 1) return null;
     const yearMatch = compact.match(/(?:18|19|20)\d{2}[a-z]?/i);
     const doi = normalizeDoi(compact);
     if (!yearMatch && !doi) return null;
@@ -122,13 +139,19 @@ const extractReferenceEntries = (pages = []) => {
     return entries;
 };
 
-const tokenOverlap = (left, right) => {
+const titleTokenSimilarity = (left, right) => {
     const a = new Set(titleTokens(left));
     const b = new Set(titleTokens(right));
-    if (!a.size || !b.size) return 0;
-    let matches = 0;
-    a.forEach(token => { if (b.has(token)) matches += 1; });
-    return matches / Math.min(a.size, b.size);
+    let shared = 0;
+    a.forEach(token => { if (b.has(token)) shared += 1; });
+    const union = new Set([...a, ...b]).size;
+    return {
+        shared,
+        leftCoverage: a.size ? shared / a.size : 0,
+        rightCoverage: b.size ? shared / b.size : 0,
+        minimumCoverage: a.size && b.size ? shared / Math.min(a.size, b.size) : 0,
+        jaccard: union ? shared / union : 0
+    };
 };
 
 const resolveCandidate = (candidate, index) => {
@@ -142,14 +165,18 @@ const resolveCandidate = (candidate, index) => {
     if (normalizedCandidateTitle.length >= 24) {
         const fuzzy = index.references.find(reference => {
             const target = normalizeTitle(reference.title);
+            const similarity = titleTokenSimilarity(target, normalizedCandidateTitle);
             return target.length >= 24
-                && (target.includes(normalizedCandidateTitle) || normalizedCandidateTitle.includes(target) || tokenOverlap(target, normalizedCandidateTitle) >= 0.82);
+                && (target.includes(normalizedCandidateTitle)
+                    || normalizedCandidateTitle.includes(target)
+                    || (similarity.shared >= 3 && similarity.minimumCoverage >= 0.82 && similarity.jaccard >= 0.55));
         });
         if (fuzzy) return { reference: fuzzy, matchType: 'title_fuzzy', confidence: 0.88 };
     }
     if (candidate.authorSurname && candidate.year) {
         const matches = index.byAuthorYear.get(`${candidate.authorSurname}|${candidate.year}`) || [];
-        if (matches.length === 1 && tokenOverlap(matches[0].title, candidate.title) >= 0.65) {
+        const similarity = matches.length === 1 ? titleTokenSimilarity(matches[0].title, candidate.title) : null;
+        if (matches.length === 1 && similarity.shared >= 2 && similarity.minimumCoverage >= 0.65 && similarity.jaccard >= 0.45) {
             return { reference: matches[0], matchType: 'author_year_title', confidence: 0.78 };
         }
     }
@@ -168,16 +195,26 @@ const findAmbiguousMatches = (candidate, index) => {
     const normalizedCandidateTitle = normalizeTitle(candidate.title);
     if (normalizedCandidateTitle.length >= 18) {
         index.references.forEach(reference => {
-            const overlap = tokenOverlap(reference.title, normalizedCandidateTitle);
-            if (overlap >= 0.5 && overlap < 0.82) add(reference, 0.56 + (overlap * 0.22), 'partial_title_overlap');
+            const similarity = titleTokenSimilarity(reference.title, normalizedCandidateTitle);
+            if (similarity.shared >= 2
+                && similarity.minimumCoverage >= 0.45
+                && similarity.jaccard >= 0.25
+                && similarity.minimumCoverage < 0.82) {
+                add(reference, 0.58 + (similarity.jaccard * 0.28), 'partial_title_overlap');
+            }
         });
     }
     if (candidate.authorSurname && candidate.year) {
         const matches = index.byAuthorYear.get(`${candidate.authorSurname}|${candidate.year}`) || [];
         matches.forEach(reference => {
-            const overlap = tokenOverlap(reference.title, candidate.title);
-            if (matches.length === 1 || overlap >= 0.15) {
-                add(reference, 0.55 + (Math.min(overlap, 1) * 0.2), matches.length === 1 ? 'author_year' : 'ambiguous_author_year');
+            const similarity = titleTokenSimilarity(reference.title, candidate.title);
+            const plausibleUnique = matches.length === 1 && similarity.shared >= 1 && similarity.minimumCoverage >= 0.25;
+            const plausibleAmbiguous = matches.length > 1
+                && similarity.shared >= 2
+                && similarity.minimumCoverage >= 0.4
+                && similarity.jaccard >= 0.25;
+            if (plausibleUnique || plausibleAmbiguous) {
+                add(reference, 0.6 + (similarity.jaccard * 0.22), matches.length === 1 ? 'author_year_title_partial' : 'ambiguous_author_year_title');
             }
         });
     }

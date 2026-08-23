@@ -114,7 +114,14 @@ app.http('GetCorpusCitationGraph', {
                 getCitationReviews(),
                 getThesisFraming().catch(() => null)
             ]);
-            const graph = aggregateCitationGraph(references, scans, reviews);
+            const referencesById = new Map(references.map(reference => [reference.id, reference]));
+            const currentScans = scans.filter(scan => {
+                const reference = referencesById.get(scan.sourceReferenceId);
+                return reference
+                    && scan.scanVersion === SCAN_VERSION
+                    && scan.sourceFingerprint === referenceFingerprint(reference);
+            });
+            const graph = aggregateCitationGraph(references, currentScans, reviews);
             const scansBySource = new Map(scans.map(scan => [scan.sourceReferenceId, scan]));
             const scannedReferenceIds = references.filter(reference => {
                 const scan = scansBySource.get(reference.id);
