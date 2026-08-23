@@ -19,6 +19,7 @@ require('./functions/doi');
 require('./functions/journal');
 require('./functions/system-prompt');
 require('./functions/thesis-framing');
+require('./functions/citation-graph');
 require('./functions/agent');
 require('./functions/cfp');
 require('./functions/podcasts');
