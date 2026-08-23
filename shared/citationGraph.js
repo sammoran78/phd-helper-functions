@@ -314,7 +314,16 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
     const missingMap = new Map();
     const referenceIds = new Set(references.map(reference => reference.id));
     const reviewKey = item => `${item.sourceReferenceId}|${item.candidateKey}|${item.targetReferenceId}`;
+    const pairKey = item => `${item.sourceReferenceId}|${item.targetReferenceId}`;
     const reviewsByKey = new Map(reviews.map(review => [reviewKey(review), review]));
+    const confirmedReviewsByPair = new Map();
+    reviews.filter(review => review.decision === 'confirmed').forEach(review => {
+        const key = pairKey(review);
+        const previous = confirmedReviewsByPair.get(key);
+        if (!previous || (review.reviewedAt || '') > (previous.reviewedAt || '')) {
+            confirmedReviewsByPair.set(key, review);
+        }
+    });
     const ambiguousMap = new Map();
     const candidateStates = new Map();
 
@@ -331,8 +340,9 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
             || match.sourceReferenceId === match.targetReferenceId) return;
         const stateKey = `${match.sourceReferenceId}|${match.candidateKey}`;
         const state = candidateStates.get(stateKey) || { confirmed: false, pending: false, rejected: false };
-        const review = reviewsByKey.get(reviewKey(match));
-        if (review?.decision === 'confirmed') {
+        const exactReview = reviewsByKey.get(reviewKey(match));
+        const confirmedReview = confirmedReviewsByPair.get(pairKey(match));
+        if (confirmedReview) {
             state.confirmed = true;
             addEdge({
                 sourceReferenceId: match.sourceReferenceId,
@@ -340,9 +350,9 @@ const aggregateCitationGraph = (references = [], scans = [], reviews = []) => {
                 matchType: 'human_verified',
                 confidence: 1,
                 evidence: match.evidence || [],
-                reviewedAt: review.reviewedAt
+                reviewedAt: confirmedReview.reviewedAt
             });
-        } else if (review?.decision === 'rejected') {
+        } else if (exactReview?.decision === 'rejected') {
             state.rejected = true;
         } else {
             state.pending = true;

@@ -179,6 +179,35 @@ test('human confirmation promotes an ambiguous match and removes it from the mis
     assert.equal(graph.edges[0].confidence, 1);
 });
 
+test('one confirmation resolves duplicate OCR variants for the same source-target pair', () => {
+    const firstMatch = {
+        sourceReferenceId: 'source-a',
+        targetReferenceId: 'target-b',
+        candidateKey: 'jones|2020|creative agency and artificial intelligence',
+        confidence: 0.88,
+        evidence: [{ pageNumber: 9, excerpt: 'Jones, B. (2020). Creative Agency and Artificial Intelligence.' }]
+    };
+    const duplicateVariant = {
+        ...firstMatch,
+        candidateKey: 'jones|2020|creative agency artificial intelIigence',
+        confidence: 0.84,
+        evidence: [{ pageNumber: 10, excerpt: 'Jones, B. (2020). Creative Agency and Artificial Intelligence.' }]
+    };
+    const graph = aggregateCitationGraph(references, [{
+        sourceReferenceId: 'source-a',
+        edges: [],
+        ambiguousMatches: [firstMatch, duplicateVariant],
+        missingWorks: []
+    }], [{
+        ...firstMatch,
+        decision: 'confirmed',
+        reviewedAt: '2026-08-23T00:00:00Z'
+    }]);
+    assert.equal(graph.ambiguousMatches.length, 0);
+    assert.equal(graph.edges.length, 1);
+    assert.equal(graph.edges[0].matchType, 'human_verified');
+});
+
 test('human rejection removes only that proposed match and retains the overlooked citation', () => {
     const match = {
         sourceReferenceId: 'source-a',
@@ -196,6 +225,29 @@ test('human rejection removes only that proposed match and retains the overlooke
     assert.equal(graph.ambiguousMatches.length, 0);
     assert.equal(graph.edges.length, 0);
     assert.equal(graph.missingWorks[0].title, 'Still overlooked');
+});
+
+test('a rejection remains citation-specific when another candidate suggests the same pair', () => {
+    const rejectedMatch = {
+        sourceReferenceId: 'source-a',
+        targetReferenceId: 'target-b',
+        candidateKey: 'candidate-two-a',
+        confidence: 0.62
+    };
+    const otherMatch = {
+        ...rejectedMatch,
+        candidateKey: 'candidate-two-b',
+        confidence: 0.6
+    };
+    const graph = aggregateCitationGraph(references, [{
+        sourceReferenceId: 'source-a',
+        edges: [],
+        ambiguousMatches: [rejectedMatch, otherMatch],
+        missingWorks: []
+    }], [{ ...rejectedMatch, decision: 'rejected' }]);
+    assert.equal(graph.ambiguousMatches.length, 1);
+    assert.equal(graph.ambiguousMatches[0].candidateKey, 'candidate-two-b');
+    assert.equal(graph.edges.length, 0);
 });
 
 test('resolves the exact stale proposal submitted by the review card', () => {
