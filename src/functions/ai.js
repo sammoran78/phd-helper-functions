@@ -2,6 +2,7 @@ const { app } = require('@azure/functions');
 const OpenAI = require('openai');
 const crypto = require('crypto');
 const { getItem, queryItems } = require('../../shared/cosmosClient');
+const { buildAuthoritativeSystemPrompt, getThesisFraming } = require('../../shared/thesisFraming');
 const {
     CHAT_PROVIDERS,
     normalizeChatProvider,
@@ -31,11 +32,8 @@ const KB_RAG_DETAILED_OUTPUT_TOKENS = parsePositiveInt(process.env.KB_RAG_DETAIL
 const KB_RAG_FILE_SEARCH_MAX_RESULTS = parsePositiveInt(process.env.KB_RAG_FILE_SEARCH_MAX_RESULTS, 8);
 const KB_RAG_MAX_CITATIONS = parsePositiveInt(process.env.KB_RAG_MAX_CITATIONS, 24);
 const KB_RAG_STREAM_HEARTBEAT_MS = parsePositiveInt(process.env.KB_RAG_STREAM_HEARTBEAT_MS, 15000);
-<<<<<<< HEAD
 const KB_RAG_ANTHROPIC_MAX_CONTEXT_CHARS = parsePositiveInt(process.env.KB_RAG_ANTHROPIC_MAX_CONTEXT_CHARS, 24000);
-=======
 const KB_RAG_PROMPT_CACHE_VERSION = 'v2';
->>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
 
 let cachedSystemPrompt = {
     value: '',
@@ -831,30 +829,40 @@ function buildApa7Fallback(reference) {
 
 async function getSystemPrompt(context) {
     if (!SYSTEM_PROMPT_DOC_ID) return '';
+    let resolvedBasePrompt = '';
     if (cachedSystemPrompt.loadedAt > 0 && (Date.now() - cachedSystemPrompt.loadedAt) < SYSTEM_PROMPT_CACHE_MS) {
-        return cachedSystemPrompt.value;
-    }
-    try {
-        let doc = await getItem(CONTAINER_CHATS, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
-        if (!doc) {
-            const matches = await queryItems(CONTAINER_CHATS, {
-                query: 'SELECT TOP 1 * FROM c WHERE c.id = @id',
-                parameters: [{ name: '@id', value: SYSTEM_PROMPT_DOC_ID }]
-            });
-            doc = Array.isArray(matches) ? matches[0] : null;
+        resolvedBasePrompt = cachedSystemPrompt.value;
+    } else {
+        try {
+            let doc = await getItem(CONTAINER_CHATS, SYSTEM_PROMPT_DOC_ID, SYSTEM_PROMPT_DOC_ID);
+            if (!doc) {
+                const matches = await queryItems(CONTAINER_CHATS, {
+                    query: 'SELECT TOP 1 * FROM c WHERE c.id = @id',
+                    parameters: [{ name: '@id', value: SYSTEM_PROMPT_DOC_ID }]
+                });
+                doc = Array.isArray(matches) ? matches[0] : null;
+            }
+            const raw = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
+            resolvedBasePrompt = (raw || '').toString().replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
+            cachedSystemPrompt = {
+                value: resolvedBasePrompt,
+                loadedAt: Date.now()
+            };
+        } catch (err) {
+            if (context?.warn) {
+                context.warn('[KB RAG] Failed to load system prompt', err?.message || String(err));
+            }
         }
-        const raw = doc?.content ?? doc?.systemPrompt ?? doc?.prompt ?? '';
-        const resolved = (raw || '').toString().replace(/\\n/g, '\n').replace(/\\r/g, '\r').trim();
-        cachedSystemPrompt = {
-            value: resolved,
-            loadedAt: Date.now()
-        };
-        return resolved;
+    }
+
+    try {
+        const framing = await getThesisFraming();
+        return buildAuthoritativeSystemPrompt(resolvedBasePrompt, framing);
     } catch (err) {
         if (context?.warn) {
-            context.warn('[KB RAG] Failed to load system prompt', err?.message || String(err));
+            context.warn('[KB RAG] Failed to load authoritative thesis framing', err?.message || String(err));
         }
-        return '';
+        return resolvedBasePrompt;
     }
 }
 
@@ -1055,7 +1063,6 @@ app.http('KBRagChat', {
                 useReasoning,
                 historyChars: historyText.length,
                 queryChars: query.length,
-<<<<<<< HEAD
                 maxOutputTokens,
                 ragProfile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard',
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
@@ -1115,27 +1122,6 @@ app.http('KBRagChat', {
                     } else {
                         response = await openai.responses.create(basePayload);
                     }
-=======
-                maxOutputTokens: basePayload.max_output_tokens,
-                ragProfile: basePayload.metadata?.rag_profile || 'standard',
-                promptCacheProfile: basePayload.metadata?.prompt_cache_profile || 'automatic',
-                maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
-            });
-
-            let response;
-            try {
-                response = await openai.responses.create({
-                    ...basePayload,
-                    ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
-                });
-            } catch (err) {
-                const msg = (err && err.message) ? err.message : String(err);
-                if (useReasoning && reasoningEffort) {
-                    context.warn('[KB RAG Chat] reasoning_effort rejected; retrying without it. Error:', msg);
-                    response = await openai.responses.create(basePayload);
-                } else {
-                    throw err;
->>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
                 }
                 content = getOutputText(response);
             }
@@ -1150,16 +1136,14 @@ app.http('KBRagChat', {
                 }
             }
 
-<<<<<<< HEAD
             const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, {
                 openai,
                 response: provider === CHAT_PROVIDERS.OPENAI ? response : null,
                 fileSearchResultMap
             });
-=======
-            const { citations, unresolvedCitationIds } = await resolveCitationsForContent(content, context, { openai, response });
-            const promptCacheUsage = getPromptCacheUsage(response);
->>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
+            const promptCacheUsage = provider === CHAT_PROVIDERS.OPENAI
+                ? getPromptCacheUsage(response)
+                : {};
             context.log('[KB RAG Chat] Completed', {
                 elapsedMs: Date.now() - requestStartedAt,
                 provider,
@@ -1305,16 +1289,11 @@ app.http('KBRagChatStream', {
                 useReasoning,
                 historyChars: historyText.length,
                 queryChars: query.length,
-<<<<<<< HEAD
                 maxOutputTokens: provider === CHAT_PROVIDERS.ANTHROPIC
                     ? anthropicPayload.max_tokens
                     : basePayload.max_output_tokens,
                 ragProfile: shouldUseDetailedOutputBudget(query) ? 'detailed' : 'standard',
-=======
-                maxOutputTokens: basePayload.max_output_tokens,
-                ragProfile: basePayload.metadata?.rag_profile || 'standard',
-                promptCacheProfile: basePayload.metadata?.prompt_cache_profile || 'automatic',
->>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
+                promptCacheProfile: basePayload?.metadata?.prompt_cache_profile || (provider === CHAT_PROVIDERS.ANTHROPIC ? 'not-applicable' : 'automatic'),
                 maxFileSearchResults: KB_RAG_FILE_SEARCH_MAX_RESULTS
             });
 
@@ -1350,7 +1329,6 @@ app.http('KBRagChatStream', {
                         let firstDeltaAt = 0;
                         let streamDeliveredText = false;
                         try {
-<<<<<<< HEAD
                             const handleTextDelta = (delta) => {
                                 if (!delta) return;
                                 if (!firstDeltaAt) {
@@ -1359,22 +1337,6 @@ app.http('KBRagChatStream', {
                                         provider,
                                         firstDeltaMs: firstDeltaAt - requestStartedAt
                                     });
-=======
-                            let openaiStream;
-                            try {
-                                openaiStream = await openai.responses.create({
-                                    ...basePayload,
-                                    stream: true,
-                                    ...(useReasoning && reasoningEffort ? { reasoning_effort: reasoningEffort } : {})
-                                });
-                            } catch (err) {
-                                const msg = (err && err.message) ? err.message : String(err);
-                                if (useReasoning && reasoningEffort) {
-                                    context.warn('[KB RAG Stream] reasoning_effort rejected; retrying without it. Error:', msg);
-                                    openaiStream = await openai.responses.create({ ...basePayload, stream: true });
-                                } else {
-                                    throw err;
->>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
                                 }
                                 fullText += delta;
                                 streamDeliveredText = true;
@@ -1458,12 +1420,10 @@ app.http('KBRagChatStream', {
                                 });
                             }
 
-<<<<<<< HEAD
                             send('done', { content: fullText, citations, unresolvedCitationIds, provider, model });
-=======
-                            send('done', { content: fullText, citations, unresolvedCitationIds });
-                            const promptCacheUsage = getPromptCacheUsage(completedResponse);
->>>>>>> ba033568f3df5ecbed4fb4736935ab88f2a264e4
+                            const promptCacheUsage = provider === CHAT_PROVIDERS.OPENAI
+                                ? getPromptCacheUsage(completedResponse)
+                                : {};
                             context.log('[KB RAG Stream] Completed', {
                                 elapsedMs: Date.now() - requestStartedAt,
                                 provider,

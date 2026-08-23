@@ -4,6 +4,7 @@ const {
     getResearchSearchPrompt,
     saveResearchSearchPrompt
 } = require('../../shared/researchSearchPrompt');
+const { verifyDashboardConfigEditor, verifyDashboardRequest } = require('../../shared/requestAuth');
 const crypto = require('crypto');
 
 // Shortlist stored in CosmosDB analytics container
@@ -308,12 +309,19 @@ const handleDismissRequest = async (body, context) => {
     };
 };
 
-// GET /api/newsreader/search-prompt - Get the shared thesis framing for discovery and gaps
+// GET /api/newsreader/search-prompt - Get the derived discovery prompt and editable priorities
 app.http('GetResearchSearchPrompt', {
     methods: ['GET'],
     authLevel: 'anonymous',
     route: 'newsreader/search-prompt',
     handler: async (request, context) => {
+        if (!verifyDashboardRequest(request)) {
+            return {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Unauthorized' })
+            };
+        }
         try {
             const prompt = await getResearchSearchPrompt();
             return {
@@ -332,12 +340,26 @@ app.http('GetResearchSearchPrompt', {
     }
 });
 
-// PUT /api/newsreader/search-prompt - Persist the shared thesis framing
+// PUT /api/newsreader/search-prompt - Persist only the optional discovery priorities
 app.http('UpdateResearchSearchPrompt', {
     methods: ['PUT'],
     authLevel: 'anonymous',
     route: 'newsreader/search-prompt',
     handler: async (request, context) => {
+        if (!verifyDashboardRequest(request)) {
+            return {
+                status: 401,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Unauthorized' })
+            };
+        }
+        if (!verifyDashboardConfigEditor(request)) {
+            return {
+                status: 403,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ error: 'Forbidden' })
+            };
+        }
         try {
             const body = await request.json();
             const saved = await saveResearchSearchPrompt(body?.content ?? body?.prompt);
@@ -629,13 +651,23 @@ app.http('GetNewsreaderArticles', {
             const REQUIRED_QUERY_ANCHOR = researchPromptTokens.slice(0, 12).join(' ') || 'creative labor creative industries arts media communication';
             const anchorQuery = (query = '') => `${query} ${REQUIRED_QUERY_ANCHOR}`.replace(/\s+/g, ' ').trim();
 
-            const RQ_SEARCH_QUERIES = [
-                { query: 'creative agency generative AI creative workers lived experience interviews ethnography', category: 'RQ1: Creative Agency' },
-                { query: 'co-creation tactics steering constraining prompts authorship credit client transparency generative AI', category: 'RQ2a: Co-Creation Tactics' },
-                { query: 'validation transferability AI creative tactics across music screen design interactive career stages', category: 'RQ2b: Transferability' },
-                { query: 'teaching resources industry guidance policy recommendations sustainable creative practice generative AI', category: 'RQ3: Translation to Practice' },
-                { query: 'attribution metadata provenance royalty licensing consent compensation creators generative AI systems', category: 'Attribution & Royalties' }
-            ];
+            const RQ_SEARCH_QUERIES = (Array.isArray(researchPromptDocument.subQuestions)
+                ? researchPromptDocument.subQuestions
+                : [])
+                .map((question, index) => {
+                    const queryTerms = Array.from(new Set(tokenizeText([
+                        question?.question,
+                        question?.title,
+                        ...(Array.isArray(question?.keywords) ? question.keywords : [])
+                    ].filter(Boolean).join(' '))))
+                        .slice(0, 18)
+                        .join(' ');
+                    return {
+                        query: queryTerms,
+                        category: `${question?.id || `SQ${index + 1}`}: ${question?.title || 'Thesis focus'}`
+                    };
+                })
+                .filter(item => item.query);
             
             // Search queries
             const baseSearchQueries = [

@@ -56,7 +56,19 @@ function verifyWorkerRequest(request) {
     return timingSafeEqualText(suppliedToken, configuredToken);
 }
 
+function verifyDashboardConfigEditor(request) {
+    const payload = verifyDashboardRequest(request);
+    if (!payload) return null;
+    const configured = (process.env.DASHBOARD_CONFIG_EDITOR_EMAILS || 'sam.moran@mq.edu.au,samuel.moran@students.mq.edu.au')
+        .split(',')
+        .map(email => email.trim().toLowerCase())
+        .filter(Boolean);
+    const email = (payload.email || '').toString().trim().toLowerCase();
+    return configured.includes(email) ? payload : null;
+}
+
 module.exports = {
+    verifyDashboardConfigEditor,
     verifyDashboardRequest,
     verifyWorkerRequest
 };

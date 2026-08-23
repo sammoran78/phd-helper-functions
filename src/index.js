@@ -18,6 +18,7 @@ require('./functions/auth');
 require('./functions/doi');
 require('./functions/journal');
 require('./functions/system-prompt');
+require('./functions/thesis-framing');
 require('./functions/agent');
 require('./functions/cfp');
 require('./functions/podcasts');

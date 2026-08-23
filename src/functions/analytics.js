@@ -292,6 +292,9 @@ app.http('AnalyzeCorpus', {
             const references = await queryItems(REFERENCES_CONTAINER, { query: ANALYTICS_REFERENCE_QUERY });
             const researchPromptDocument = await getResearchSearchPrompt();
             const researchPrompt = researchPromptDocument.content;
+            const subQuestions = Array.isArray(researchPromptDocument.subQuestions)
+                ? researchPromptDocument.subQuestions
+                : [];
             const bibliographyReferenceCount = references.filter(ref => Number(ref?.ref_knowledge_status || 0) >= 3).length;
             const readingListReferenceCount = references.length - bibliographyReferenceCount;
             
@@ -360,6 +363,7 @@ app.http('AnalyzeCorpus', {
 
             let insights = '';
             let gaps = [];
+            let questionCoverage = [];
 
             // AI Analysis (if API key present)
             if (process.env.OPENAI_API_KEY) {
@@ -388,12 +392,16 @@ app.http('AnalyzeCorpus', {
                         
                         Task:
                         1. Summarize the research landscape and coverage relative to the current thesis framing.
-                        2. Identify 3-5 critical gaps in methodology, theory, empirical settings, or thesis-framing coverage. Compare against the complete saved collection, including both reading-list items and the Knowledge Base/bibliography.
-                        3. Suggest specific types of sources needed to fill these gaps.
+                        2. Assess coverage for every listed sub-question separately. Do not merge or renumber the sub-questions.
+                        3. Identify 3-5 critical gaps in methodology, theory, empirical settings, or sub-question coverage. Compare against the complete saved collection, including both reading-list items and the Knowledge Base/bibliography.
+                        4. Suggest specific types of sources needed to fill these gaps.
                         
                         Output JSON format:
                         {
                             "insights": "paragraph summary...",
+                            "questionCoverage": [
+                                { "id": "SQ1", "title": "Short title", "coverage": 0.7, "assessment": "Evidence-based assessment...", "sourceCountEstimate": 12, "missingEvidence": ["missing item"] }
+                            ],
                             "gaps": [
                                 { "name": "Gap Name", "description": "Description...", "severity": 0.8 (0-1), "connectedDomains": ["Domain1"], "searchQueries": ["query1", "query2"] }
                             ]
@@ -409,6 +417,7 @@ app.http('AnalyzeCorpus', {
                     const aiResult = JSON.parse(completion.choices[0].message.content);
                     insights = aiResult.insights;
                     gaps = aiResult.gaps || [];
+                    questionCoverage = Array.isArray(aiResult.questionCoverage) ? aiResult.questionCoverage : [];
                     
                 } catch (aiError) {
                     context.warn('AI Analysis failed, falling back to heuristics:', aiError.message);
@@ -477,6 +486,54 @@ app.http('AnalyzeCorpus', {
                         ].filter(Boolean)
                     });
                 }
+
+                questionCoverage = subQuestions.map(question => {
+                    const questionTokens = Array.from(new Set(tokenizeCoverageText([
+                        question.title,
+                        question.question,
+                        ...(Array.isArray(question.keywords) ? question.keywords : [])
+                    ].filter(Boolean).join(' '))));
+                    const coveredTerms = questionTokens.filter(token => (corpusTokenCounts.get(token) || 0) >= 2);
+                    const coverage = questionTokens.length ? coveredTerms.length / questionTokens.length : 0;
+                    return {
+                        id: question.id,
+                        title: question.title,
+                        coverage: Number(coverage.toFixed(2)),
+                        assessment: `${coveredTerms.length} of ${questionTokens.length} framing concepts appear in at least two saved sources.`,
+                        sourceCountEstimate: null,
+                        missingEvidence: questionTokens.filter(token => !coveredTerms.includes(token)).slice(0, 6)
+                    };
+                });
+            }
+
+            // Keep the dashboard complete even if an otherwise valid AI response omits SQ coverage.
+            if (!questionCoverage.length && subQuestions.length) {
+                const corpusTokenCounts = new Map();
+                references.forEach(ref => {
+                    const text = [
+                        ref.title, ref.keywords, ref.tags, ref.discipline, ref.frameworks,
+                        ref.concepts, ref.summary, ref.abstract, ref.design, ref.analysis
+                    ].filter(Boolean).join(' ');
+                    new Set(tokenizeCoverageText(text)).forEach(token => {
+                        corpusTokenCounts.set(token, (corpusTokenCounts.get(token) || 0) + 1);
+                    });
+                });
+                questionCoverage = subQuestions.map(question => {
+                    const questionTokens = Array.from(new Set(tokenizeCoverageText([
+                        question.title,
+                        question.question,
+                        ...(Array.isArray(question.keywords) ? question.keywords : [])
+                    ].filter(Boolean).join(' '))));
+                    const coveredTerms = questionTokens.filter(token => (corpusTokenCounts.get(token) || 0) >= 2);
+                    return {
+                        id: question.id,
+                        title: question.title,
+                        coverage: Number((questionTokens.length ? coveredTerms.length / questionTokens.length : 0).toFixed(2)),
+                        assessment: `${coveredTerms.length} of ${questionTokens.length} framing concepts appear in at least two saved sources.`,
+                        sourceCountEstimate: null,
+                        missingEvidence: questionTokens.filter(token => !coveredTerms.includes(token)).slice(0, 6)
+                    };
+                });
             }
             
             const analysis = {
@@ -491,9 +548,12 @@ app.http('AnalyzeCorpus', {
                 readingListReferenceCount,
                 researchPrompt,
                 researchPromptUpdatedAt: researchPromptDocument.updatedAt || null,
+                framingVersion: researchPromptDocument.framingVersion || null,
+                subQuestions,
                 insights,
                 methods,
                 subjects,
+                questionCoverage,
                 gaps,
                 byType: typeCounts,
                 byYear: yearCounts,
