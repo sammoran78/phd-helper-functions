@@ -66,6 +66,9 @@ npm install
    - Container 3:
      - Container ID: `analytics`
      - Partition key: `/id`
+   - Container 4:
+     - Container ID: the value configured in `COSMOSDB_CONTAINER_PRESENTATIONS`
+     - Partition key: `/id`
 4. **Get Connection String**:
    - Go to "Keys" section
    - Copy "PRIMARY CONNECTION STRING"
@@ -99,6 +102,7 @@ npm install
    COSMOSDB_CONTAINER_REFERENCES=references
    COSMOSDB_CONTAINER_PROJECTS=projects
    COSMOSDB_CONTAINER_ANALYTICS=analytics
+   COSMOSDB_CONTAINER_PRESENTATIONS=presentations
    BLOB_STORAGE_CONNECTION_STRING=<your_blob_storage_connection_string>
    BLOB_CONTAINER_UPLOADS=uploads
    OPENAI_API_KEY=<your_openai_api_key>
@@ -129,6 +133,7 @@ Create a `.env` file or update `local.settings.json`:
     "COSMOSDB_CONTAINER_REFERENCES": "references",
     "COSMOSDB_CONTAINER_PROJECTS": "projects",
     "COSMOSDB_CONTAINER_ANALYTICS": "analytics",
+    "COSMOSDB_CONTAINER_PRESENTATIONS": "presentations",
     "BLOB_STORAGE_CONNECTION_STRING": "<your_connection_string>",
     "BLOB_CONTAINER_UPLOADS": "uploads",
     "OPENAI_API_KEY": "<your_key>",
@@ -208,6 +213,12 @@ curl -X POST https://<your-function-app-name>.azurewebsites.net/api/references \
 | DELETE | `/api/references/{id}` | Delete reference |
 | POST | `/api/references/upload` | Upload PDF/DOCX to Blob Storage |
 | POST | `/api/references/analyze` | Analyze document with OpenAI |
+| GET | `/api/presentations` | List the current owner's presentation projects |
+| PUT | `/api/presentations/{id}` | Save a project and append an immutable revision |
+| DELETE | `/api/presentations/{id}` | Delete an owned project and its revisions |
+| GET | `/api/presentations/{id}/revisions` | List the latest 50 owned revisions |
+
+Presentation endpoints use the Static Web Apps `x-ms-client-principal` user id when available. Anonymous clients must send the random `X-Presenter-Workspace` capability created by PhD Presenter; there is no unscoped list route. Project payloads are capped at 1.8 MB to remain below the Cosmos item-size limit.
 
 ## Frontend Integration
 
@@ -222,6 +233,8 @@ const API_BASE = 'https://<your-function-app-name>.azurewebsites.net/api';
 // OR for Static Web Apps with integrated API:
 const API_BASE = '/api';
 ```
+
+PhD Presenter is currently on an Azure Static Web Apps **Free** plan, which cannot link this existing Function App as an `/api` backend. Build it with `NEXT_PUBLIC_PRESENTATIONS_API_BASE=https://phd-function-app-dwbbgeeza3fyhuej.australiaeast-01.azurewebsites.net/api`, and configure this Function App to allow the exact origin `https://ashy-bay-097292d00.7.azurestaticapps.net` through CORS. If the Static Web App later moves to Standard or Dedicated, it can link this Function App and use `/api` instead.
 
 ## Security Notes
 

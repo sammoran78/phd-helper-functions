@@ -11,6 +11,7 @@ require('./functions/newsreader');
 require('./functions/analytics');
 require('./functions/surveys');
 require('./functions/projects');
+require('./functions/presentations');
 require('./functions/ai');
 require('./functions/kb-pipeline');
 require('./functions/chats');
