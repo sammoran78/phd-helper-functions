@@ -1,3 +1,4 @@
+const { buildOpenAiTemperatureOptions } = require('../../shared/openaiOptions');
 const { app } = require('@azure/functions');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
@@ -145,7 +146,7 @@ async function buildWeeklyPlanningBrief(openTasks, plannerTasks, upcomingEvents,
     try {
         const completion = await client.chat.completions.create({
             model,
-            temperature: 0.2,
+            ...buildOpenAiTemperatureOptions(),
             response_format: { type: 'json_object' },
             messages: [
                 {
@@ -363,7 +364,7 @@ async function buildCrossSourceDependencyBrief(openTasks, plannerTasks, upcoming
     try {
         const completion = await client.chat.completions.create({
             model,
-            temperature: 0.2,
+            ...buildOpenAiTemperatureOptions(),
             response_format: { type: 'json_object' },
             messages: [
                 {
@@ -507,7 +508,7 @@ async function buildEndOfDayCarryover(openTasks, recentlyClosedTasks, context) {
     try {
         const completion = await client.chat.completions.create({
             model,
-            temperature: 0.2,
+            ...buildOpenAiTemperatureOptions(),
             response_format: { type: 'json_object' },
             messages: [
                 {
@@ -630,7 +631,7 @@ async function buildMorningBriefFromTasks(tasks, context) {
     try {
         const completion = await client.chat.completions.create({
             model,
-            temperature: 0.2,
+            ...buildOpenAiTemperatureOptions(),
             response_format: { type: 'json_object' },
             messages: [
                 {
@@ -850,7 +851,7 @@ async function synthesizeEmailTasks(messageSignals, context) {
     try {
         const completion = await client.chat.completions.create({
             model,
-            temperature: 0.2,
+            ...buildOpenAiTemperatureOptions(),
             response_format: { type: 'json_object' },
             messages: [
                 {
@@ -1617,7 +1618,7 @@ app.http('StreamAgentSupervisorChat', {
                         try {
                             const completionStream = await client.chat.completions.create({
                                 model,
-                                temperature: 0.25,
+                                ...buildOpenAiTemperatureOptions(),
                                 stream: true,
                                 messages
                             });

@@ -1,11 +1,8 @@
+const { buildOpenAiTemperatureOptions } = require('../../shared/openaiOptions');
 const { app } = require('@azure/functions');
 const { downloadBlob } = require('../../shared/blobClient');
 const { extractTextFromBuffer } = require('../../shared/textExtractor');
 const OpenAI = require('openai');
-
-function supportsCustomTemperature(model) {
-    return !/^(gpt-5|o\d|o-)/i.test(model || '');
-}
 
 // POST /api/references/analyze - Analyze a document with OpenAI
 app.http('AnalyzeReference', {
@@ -138,6 +135,7 @@ ${text.substring(0, 15000)}`
             
             const completionOptions = {
                 model: model,
+                ...buildOpenAiTemperatureOptions(),
                 messages: [
                     { role: 'system', content: 'You are an academic research assistant helping to analyze scholarly papers.' },
                     { role: 'user', content: prompt }
@@ -145,10 +143,6 @@ ${text.substring(0, 15000)}`
                 response_format: { type: 'json_object' },
                 max_completion_tokens: 1500
             };
-
-            if (supportsCustomTemperature(model)) {
-                completionOptions.temperature = 0.3;
-            }
 
             const completion = await openai.chat.completions.create(completionOptions);
             

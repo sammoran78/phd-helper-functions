@@ -1,3 +1,4 @@
+const { buildOpenAiTemperatureOptions } = require('../../shared/openaiOptions');
 const { app } = require('@azure/functions');
 const { queryItems, createItem, getItem, upsertItem, deleteItem } = require('../../shared/cosmosClient');
 const { deleteBlob, blobExists } = require('../../shared/blobClient');
@@ -1136,7 +1137,7 @@ const enrichBibtexMetadataWithLlm = async (references, context, enabled) => {
     try {
         const completion = await client.chat.completions.create({
             model: process.env.BIBTEX_LLM_MODEL || 'gpt-4o-mini',
-            temperature: 0,
+            ...buildOpenAiTemperatureOptions(),
             response_format: { type: 'json_object' },
             messages: [
                 {

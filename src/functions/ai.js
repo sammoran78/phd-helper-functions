@@ -1,3 +1,4 @@
+const { buildOpenAiTemperatureOptions } = require('../../shared/openaiOptions');
 const { app } = require('@azure/functions');
 const OpenAI = require('openai');
 const crypto = require('crypto');
@@ -65,7 +66,7 @@ function corsPreflightResponse() {
     });
 }
 
-function requiresDefaultTemperature(model) {
+function requiresReasoningTokenBudget(model) {
     const normalized = (model || '').toString().trim().toLowerCase();
     if (/^(o\d|o-)/.test(normalized)) return true;
 
@@ -100,7 +101,7 @@ app.http('AIChat', {
     handler: async (request, context) => {
         try {
             const body = await request.json();
-            const { messages, max_tokens = 500, temperature = 0.7 } = body;
+            const { messages, max_tokens = 500 } = body;
             
             if (!messages || !Array.isArray(messages) || messages.length === 0) {
                 return {
@@ -121,8 +122,8 @@ app.http('AIChat', {
             
             const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
             const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-            const useDefaultTemperature = requiresDefaultTemperature(model);
-            const completionTokenLimit = useDefaultTemperature ? Math.max(Number(max_tokens) || 500, 1500) : max_tokens;
+            const useReasoningTokenBudget = requiresReasoningTokenBudget(model);
+            const completionTokenLimit = useReasoningTokenBudget ? Math.max(Number(max_tokens) || 500, 1500) : max_tokens;
             
             context.log(`[AI Chat] Calling OpenAI with ${messages.length} messages`);
             
@@ -130,7 +131,7 @@ app.http('AIChat', {
                 model: model,
                 messages: messages,
                 max_completion_tokens: completionTokenLimit,
-                temperature: useDefaultTemperature ? 1 : temperature
+                ...buildOpenAiTemperatureOptions()
             });
             
             const content = getChatCompletionContent(completion);
@@ -375,6 +376,7 @@ function buildRagPayload({ model, vectorStoreId, systemPrompt, historyText, quer
     };
     const payload = {
         model,
+        ...buildOpenAiTemperatureOptions(),
         input: [
             {
                 type: 'message',

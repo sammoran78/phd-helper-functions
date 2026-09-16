@@ -1,3 +1,4 @@
+const { buildOpenAiTemperatureOptions } = require('../../shared/openaiOptions');
 /**
  * Analytics Azure Functions
  * Store, retrieve, and update analytics data in CosmosDB
@@ -410,6 +411,7 @@ app.http('AnalyzeCorpus', {
 
                     const completion = await openai.chat.completions.create({
                         model: "gpt-4o",
+                        ...buildOpenAiTemperatureOptions(),
                         messages: [{ role: "user", content: prompt }],
                         response_format: { type: "json_object" }
                     });

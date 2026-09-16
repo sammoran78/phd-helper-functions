@@ -107,12 +107,15 @@ npm install
    BLOB_CONTAINER_UPLOADS=uploads
    OPENAI_API_KEY=<your_openai_api_key>
    OPENAI_MODEL=gpt-4o-mini
+   OPENAI_TEMPERATURE=
    OPENAI_REASONING_EFFORT=low
    ANTHROPIC_API_KEY=<your_anthropic_api_key>
    ANTHROPIC_MODEL=<your_anthropic_model>
    ANTHROPIC_REASONING_EFFORT=high
    ```
 3. **Save** the configuration
+
+`OPENAI_TEMPERATURE` is an optional override for all OpenAI text-generation requests. Leave it unset or blank (including whitespace) to omit the parameter and use the selected model's default. Set a number from 0 to 2 to override it; `0` is a valid override. The selected model must support the configured value. Invalid values fail with a configuration error. This setting takes precedence over any temperature supplied by a chat client and does not affect Anthropic requests.
 
 #### RAG prompt caching
 
@@ -138,6 +141,7 @@ Create a `.env` file or update `local.settings.json`:
     "BLOB_CONTAINER_UPLOADS": "uploads",
     "OPENAI_API_KEY": "<your_key>",
     "OPENAI_MODEL": "gpt-4o-mini",
+    "OPENAI_TEMPERATURE": "",
     "OPENAI_REASONING_EFFORT": "low",
     "ANTHROPIC_API_KEY": "<your_key>",
     "ANTHROPIC_MODEL": "<your_anthropic_model>",
